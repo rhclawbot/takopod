@@ -82,6 +82,10 @@ async def run_scheduler() -> None:
 
         if tick % IDLE_REAPER_TICKS == 0:
             try:
+                await _check_worker_liveness()
+            except Exception:
+                logger.exception("Worker liveness check error")
+            try:
                 await _reap_idle_workers()
             except Exception:
                 logger.exception("Idle reaper error")
@@ -590,6 +594,60 @@ async def _cancel_task(task: asyncio.Task | None) -> None:
         await task
     except (asyncio.CancelledError, Exception):
         pass
+
+
+async def _check_worker_liveness() -> None:
+    """Detect workers whose process died but _monitor_worker failed to clean up.
+
+    Pure in-memory check — no subprocess calls.
+    """
+    from orchestrator.routes import get_active_workers, get_workers_lock
+
+    active_workers = get_active_workers()
+    workers_lock = get_workers_lock()
+
+    dead: list[tuple[str, object]] = []
+
+    async with workers_lock:
+        for agent_id, worker in list(active_workers.items()):
+            if worker.shutting_down:
+                continue
+            if worker.process.returncode is not None:
+                if worker.monitor_task is None or worker.monitor_task.done():
+                    dead.append((agent_id, worker))
+                    active_workers.pop(agent_id)
+
+    for agent_id, worker in dead:
+        logger.warning(
+            "Liveness check: agent %s has dead process (exit code %s) "
+            "with no active monitor — cleaning up",
+            agent_id, worker.process.returncode,
+        )
+        await _cancel_task(worker.polling_task)
+        await _cancel_task(worker.monitor_task)
+        if worker.mcp_manager:
+            await worker.mcp_manager.stop()
+
+        container_name = f"takopod-{agent_id[:8]}"
+        await kill_container(container_name)
+
+        db = await get_db()
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        await db.execute(
+            "UPDATE agent_containers SET status = 'error', stopped_at = ?, "
+            "error_message = ? WHERE id = ? AND status != 'stopped'",
+            (
+                now,
+                f"Process died unexpectedly (exit code {worker.process.returncode})",
+                worker.container_record_id,
+            ),
+        )
+        await db.execute(
+            "UPDATE messages SET status = 'complete' "
+            "WHERE agent_id = ? AND status = 'streaming'",
+            (agent_id,),
+        )
+        await db.commit()
 
 
 async def _reap_idle_workers() -> None:

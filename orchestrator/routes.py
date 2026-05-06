@@ -2294,15 +2294,44 @@ async def _ensure_worker(agent_id: str, ws: WebSocket) -> None:
     old_polling = None
     old_monitor = None
     reattach = False
+    stale_worker = None
 
     async with _workers_lock:
         worker = _active_workers.get(agent_id)
         if worker:
-            reattach = True
-            old_polling = worker.polling_task
-            old_monitor = worker.monitor_task
-            worker.polling_task = None
-            worker.monitor_task = None
+            if worker.process.returncode is not None:
+                logger.warning(
+                    "Stale worker for agent %s (exit code %s), "
+                    "will spawn fresh container",
+                    agent_id, worker.process.returncode,
+                )
+                stale_worker = _active_workers.pop(agent_id, None)
+                old_polling = worker.polling_task
+                old_monitor = worker.monitor_task
+            else:
+                reattach = True
+                old_polling = worker.polling_task
+                old_monitor = worker.monitor_task
+                worker.polling_task = None
+                worker.monitor_task = None
+
+    if stale_worker:
+        await _cancel_task(old_polling)
+        await _cancel_task(old_monitor)
+        if stale_worker.mcp_manager:
+            await stale_worker.mcp_manager.stop()
+        container_name = f"takopod-{agent_id[:8]}"
+        await kill_container(container_name)
+        db = await get_db()
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        await db.execute(
+            "UPDATE agent_containers SET status = 'error', stopped_at = ? "
+            "WHERE id = ? AND status != 'stopped'",
+            (now, stale_worker.container_record_id),
+        )
+        await db.commit()
+        old_polling = None
+        old_monitor = None
 
     if reattach:
         # Phase 2: Cancel old tasks outside lock (monitor acquires lock)
@@ -2396,15 +2425,41 @@ async def ensure_worker_headless(agent_id: str) -> None:
     Used by the scheduler to guarantee the polling loop is active before
     queuing a scheduled task message.
     """
+    stale = None
+
     async with _workers_lock:
         worker = _active_workers.get(agent_id)
         if worker:
-            if worker.polling_task is None or worker.polling_task.done():
-                worker.polling_task = start_polling_loop(
-                    agent_id, worker.host_dir, worker.ws_manager,
-                    approval_manager=_gh_approval_manager,
+            if worker.process.returncode is not None:
+                logger.warning(
+                    "Stale headless worker for agent %s (exit code %s), "
+                    "will respawn",
+                    agent_id, worker.process.returncode,
                 )
-            return
+                stale = _active_workers.pop(agent_id, None)
+            else:
+                if worker.polling_task is None or worker.polling_task.done():
+                    worker.polling_task = start_polling_loop(
+                        agent_id, worker.host_dir, worker.ws_manager,
+                        approval_manager=_gh_approval_manager,
+                    )
+                return
+
+    if stale:
+        await _cancel_task(stale.polling_task)
+        await _cancel_task(stale.monitor_task)
+        if stale.mcp_manager:
+            await stale.mcp_manager.stop()
+        container_name = f"takopod-{agent_id[:8]}"
+        await kill_container(container_name)
+        db = await get_db()
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        await db.execute(
+            "UPDATE agent_containers SET status = 'error', stopped_at = ? "
+            "WHERE id = ? AND status != 'stopped'",
+            (now, stale.container_record_id),
+        )
+        await db.commit()
 
     # Sync registry skills before spawning container
     db = await get_db()
@@ -2559,6 +2614,7 @@ async def _monitor_worker(agent_id: str) -> None:
         pass
 
     # Clean up dead container (outside lock — involves subprocess)
+    container_name = f"takopod-{agent_id[:8]}"
     await kill_container(container_name)
 
     # Update DB status
@@ -2599,7 +2655,8 @@ async def _monitor_worker(agent_id: str) -> None:
             "No WebSocket connected for agent %s — skipping respawn", agent_id,
         )
         async with _workers_lock:
-            _active_workers.pop(agent_id, None)
+            if _active_workers.get(agent_id) is worker:
+                _active_workers.pop(agent_id, None)
         return
 
     # Circuit breaker: prune old crash times, then check
@@ -2623,7 +2680,8 @@ async def _monitor_worker(agent_id: str) -> None:
         except Exception:
             pass
         async with _workers_lock:
-            _active_workers.pop(agent_id, None)
+            if _active_workers.get(agent_id) is worker:
+                _active_workers.pop(agent_id, None)
         return
 
     # Respawn (acquires lock internally)
