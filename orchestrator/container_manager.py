@@ -294,8 +294,8 @@ async def sync_agent_skills(agent_id: str, host_dir: Path) -> None:
             task_id = str(uuid.uuid4())
             await db.execute(
                 "INSERT INTO agentic_tasks "
-                "(id, agent_id, prompt, interval_seconds, script, source_skill_id, trigger_type) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'interval')",
+                "(id, agent_id, prompt, interval_seconds, script, source_skill_id, trigger_type, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'interval', 'enabled')",
                 (task_id, agent_id, f"Run script {script_path}", int(interval),
                  script_path, skill_id),
             )
@@ -304,6 +304,22 @@ async def sync_agent_skills(agent_id: str, host_dir: Path) -> None:
                 agent_id[:8], script_path, int(interval),
             )
     if added_skills:
+        await db.commit()
+
+    # Set per-agent timeout for agents with periodic interval tasks
+    async with db.execute(
+        "SELECT COUNT(*) FROM agentic_tasks "
+        "WHERE agent_id = ? AND trigger_type = 'interval'",
+        (agent_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    if row and row[0] > 0:
+        await db.execute(
+            "UPDATE agents SET idle_timeout_seconds = MAX(idle_timeout_seconds, 600), "
+            "inflight_hard_timeout = MAX(inflight_hard_timeout, 1200) "
+            "WHERE id = ?",
+            (agent_id,),
+        )
         await db.commit()
 
 

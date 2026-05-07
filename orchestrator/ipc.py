@@ -40,6 +40,8 @@ async def queue_message(
     attachments: list[str] | None = None,
     model: str | None = None,
     pipeline_payload: typing.Any | None = None,
+    channel_id: str | None = None,
+    thread_ts: str | None = None,
 ) -> None:
     db = await get_db()
     payload_dict: dict = {
@@ -59,6 +61,10 @@ async def queue_message(
         payload_dict["model"] = model
     if pipeline_payload is not None:
         payload_dict.update(pipeline_payload.to_message_fields())
+    if channel_id:
+        payload_dict["channel_id"] = channel_id
+    if thread_ts:
+        payload_dict["thread_ts"] = thread_ts
 
     payload = json.dumps(payload_dict)
     await db.execute(
@@ -85,8 +91,8 @@ async def store_scheduled_message(
         "agentic_task_id": agentic_task_id,
     })
     await db.execute(
-        "INSERT INTO messages (id, agent_id, role, content, metadata) "
-        "VALUES (?, ?, 'user', ?, ?)",
+        "INSERT INTO messages (id, agent_id, role, content, metadata, source) "
+        "VALUES (?, ?, 'user', ?, ?, 'scheduled_task')",
         (message_id, agent_id, content, metadata),
     )
     await db.commit()
@@ -136,8 +142,8 @@ async def store_bootstrap_message(
     db = await get_db()
     metadata = json.dumps({"source": "bootstrap"})
     await db.execute(
-        "INSERT INTO messages (id, agent_id, role, content, metadata, visibility) "
-        "VALUES (?, ?, 'user', ?, ?, 'hidden')",
+        "INSERT INTO messages (id, agent_id, role, content, metadata, visibility, source) "
+        "VALUES (?, ?, 'user', ?, ?, 'hidden', 'bootstrap')",
         (message_id, agent_id, content, metadata),
     )
     await db.commit()
@@ -164,13 +170,14 @@ async def store_slack_message(
         meta["attachments"] = attachments
     metadata = json.dumps(meta)
     await db.execute(
-        "INSERT INTO messages (id, agent_id, role, content, metadata) "
-        "VALUES (?, ?, 'user', ?, ?)",
+        "INSERT INTO messages (id, agent_id, role, content, metadata, source) "
+        "VALUES (?, ?, 'user', ?, ?, 'slack')",
         (message_id, agent_id, content, metadata),
     )
     await db.commit()
     await queue_message(
         agent_id, message_id, content, source="slack", attachments=attachments,
+        channel_id=channel_id, thread_ts=thread_ts,
     )
 
 
@@ -270,16 +277,18 @@ async def _db_ensure_row(
     row_id: str, agent_id: str, extra_metadata: dict | None = None,
 ) -> None:
     meta: dict = {"blocks": []}
+    source = "user"
     if extra_metadata:
         meta.update(extra_metadata)
+        source = extra_metadata.get("source", "user")
     metadata = json.dumps(meta)
     try:
         db = await get_db()
         await db.execute(
             "INSERT OR IGNORE INTO messages "
-            "(id, agent_id, role, content, status, metadata) "
-            "VALUES (?, ?, 'assistant', '', 'streaming', ?)",
-            (row_id, agent_id, metadata),
+            "(id, agent_id, role, content, status, metadata, source) "
+            "VALUES (?, ?, 'assistant', '', 'streaming', ?, ?)",
+            (row_id, agent_id, metadata, source),
         )
         await db.commit()
     except SqliteError:
@@ -658,8 +667,8 @@ async def _handle_tool_request(
                 "(id, agent_id, prompt, allowed_tools, interval_seconds, "
                 "trigger_type, trigger_config, trigger_secret, "
                 "base_interval_seconds, max_interval_seconds, "
-                "cursor, last_checked_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "cursor, last_checked_at, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'enabled')",
                 (task_id, agent_id, prompt, allowed_tools, interval_seconds,
                  trigger_type, json.dumps(trigger_config), trigger_secret,
                  base_interval, max_interval,
@@ -672,7 +681,7 @@ async def _handle_tool_request(
                 "task_id": task_id,
                 "prompt": prompt,
                 "trigger_type": trigger_type,
-                "status": "active",
+                "status": "enabled",
             }
             if trigger_type == "interval":
                 data["interval_minutes"] = interval_minutes
@@ -786,24 +795,24 @@ async def _handle_tool_request(
         elif action == "pause_schedule":
             task_id = params.get("task_id", "")
             cursor = await db.execute(
-                "UPDATE agentic_tasks SET status = 'paused' WHERE id = ? AND status = 'active'",
+                "UPDATE agentic_tasks SET status = 'disabled' WHERE id = ? AND status = 'enabled'",
                 (task_id,),
             )
             await db.commit()
             if cursor.rowcount == 0:
-                return {"request_id": request_id, "status": "error", "error": "Schedule not found or not active"}
-            return {"request_id": request_id, "status": "ok", "data": {"task_id": task_id, "status": "paused"}}
+                return {"request_id": request_id, "status": "error", "error": "Schedule not found or not enabled"}
+            return {"request_id": request_id, "status": "ok", "data": {"task_id": task_id, "status": "disabled"}}
 
         elif action == "resume_schedule":
             task_id = params.get("task_id", "")
             cursor = await db.execute(
-                "UPDATE agentic_tasks SET status = 'active' WHERE id = ? AND status = 'paused'",
+                "UPDATE agentic_tasks SET status = 'enabled' WHERE id = ? AND status = 'disabled'",
                 (task_id,),
             )
             await db.commit()
             if cursor.rowcount == 0:
-                return {"request_id": request_id, "status": "error", "error": "Schedule not found or not paused"}
-            return {"request_id": request_id, "status": "ok", "data": {"task_id": task_id, "status": "active"}}
+                return {"request_id": request_id, "status": "error", "error": "Schedule not found or not disabled"}
+            return {"request_id": request_id, "status": "ok", "data": {"task_id": task_id, "status": "enabled"}}
 
         elif action == "signal_activity":
             task_id = params.get("task_id")
@@ -811,7 +820,7 @@ async def _handle_tool_request(
                 cursor = await db.execute(
                     "UPDATE agentic_tasks "
                     "SET interval_seconds = base_interval_seconds "
-                    "WHERE id = ? AND agent_id = ? AND status = 'active' "
+                    "WHERE id = ? AND agent_id = ? AND status = 'enabled' "
                     "AND base_interval_seconds IS NOT NULL",
                     (task_id, agent_id),
                 )
@@ -826,14 +835,14 @@ async def _handle_tool_request(
                 cursor = await db.execute(
                     "UPDATE agentic_tasks "
                     "SET interval_seconds = base_interval_seconds "
-                    "WHERE agent_id = ? AND status = 'active' "
+                    "WHERE agent_id = ? AND status = 'enabled' "
                     "AND base_interval_seconds IS NOT NULL",
                     (agent_id,),
                 )
                 await db.commit()
                 async with db.execute(
                     "SELECT id FROM agentic_tasks "
-                    "WHERE agent_id = ? AND status = 'active' "
+                    "WHERE agent_id = ? AND status = 'enabled' "
                     "AND base_interval_seconds IS NOT NULL",
                     (agent_id,),
                 ) as cur:
@@ -1180,7 +1189,7 @@ async def _process_output(
             row_id = await _process_event(
                 event, agent_id, ws_mgr, source_meta,
             )
-            if row_id:
+            if row_id and (not source_meta or source_meta.get("source") != "scheduled_task"):
                 notified.add(row_id)
             if event.get("type") in ("complete", "system_error", "script_result") and msg_id:
                 _inflight_source.pop(msg_id, None)
@@ -1305,13 +1314,18 @@ async def _polling_loop(
                 for msg in messages:
                     msg["timestamp"] = now
 
-                # Track source metadata per message for scheduled tasks
                 for msg in messages:
-                    if msg.get("agentic_task_id") and msg.get("message_id"):
-                        _inflight_source[msg["message_id"]] = {
-                            "source": "scheduled_task",
-                            "agentic_task_id": msg["agentic_task_id"],
-                        }
+                    message_id = msg.get("message_id")
+                    if message_id:
+                        source = msg.get("source", "user")
+                        if source != "user":
+                            entry: dict = {"source": source}
+                            if msg.get("agentic_task_id"):
+                                entry["agentic_task_id"] = msg["agentic_task_id"]
+                            if source == "slack":
+                                entry["channel_id"] = msg.get("channel_id", "")
+                                entry["thread_ts"] = msg.get("thread_ts", "")
+                            _inflight_source[message_id] = entry
 
                 atomic_write(input_path, json.dumps(messages).encode())
                 msg_types = [m.get("type", "user_message") for m in messages]

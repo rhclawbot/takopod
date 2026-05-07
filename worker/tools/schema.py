@@ -91,7 +91,7 @@ list_schedules_schema = {
         "properties": {
             "status": {
                 "type": "string",
-                "description": "Optional: filter by 'active' or 'paused'.",
+                "description": "Optional: filter by 'enabled' or 'disabled'.",
             },
         },
         "required": [],
@@ -152,7 +152,7 @@ delete_schedule_schema = {
 
 pause_schedule_schema = {
     "name": "pause_schedule",
-    "description": "Pause an active scheduled task. It will stop executing until resumed.",
+    "description": "Disable an enabled scheduled task. It will stop executing until re-enabled.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -164,7 +164,7 @@ pause_schedule_schema = {
 
 resume_schedule_schema = {
     "name": "resume_schedule",
-    "description": "Resume a paused scheduled task.",
+    "description": "Re-enable a disabled scheduled task.",
     "input_schema": {
         "type": "object",
         "properties": {

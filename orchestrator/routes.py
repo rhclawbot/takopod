@@ -1849,8 +1849,8 @@ async def create_schedule(body: ScheduleCreateRequest):
         "(id, agent_id, prompt, interval_seconds, "
         "trigger_type, trigger_config, trigger_secret, "
         "base_interval_seconds, max_interval_seconds, model, "
-        "cursor, last_checked_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "cursor, last_checked_at, status) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'enabled')",
         (task_id, body.agent_id, body.prompt,
          interval_seconds, body.trigger_type, json.dumps(trigger_config),
          trigger_secret, base_interval, max_interval, body.model,
@@ -1875,7 +1875,7 @@ async def pause_schedule(task_id: str):
         if not await cur.fetchone():
             raise HTTPException(status_code=404, detail="Schedule not found")
     await db.execute(
-        "UPDATE agentic_tasks SET status = 'paused' WHERE id = ?", (task_id,),
+        "UPDATE agentic_tasks SET status = 'disabled' WHERE id = ?", (task_id,),
     )
     await db.commit()
     return {"status": "ok", "task_id": task_id}
@@ -1890,7 +1890,7 @@ async def resume_schedule(task_id: str):
         if not await cur.fetchone():
             raise HTTPException(status_code=404, detail="Schedule not found")
     await db.execute(
-        "UPDATE agentic_tasks SET status = 'active' WHERE id = ?", (task_id,),
+        "UPDATE agentic_tasks SET status = 'enabled', retry_count = 0 WHERE id = ?", (task_id,),
     )
     await db.commit()
     return {"status": "ok", "task_id": task_id}
@@ -1963,8 +1963,8 @@ async def trigger_webhook(agent_id: str, task_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Trigger not found")
     if row[4] != "webhook":
         raise HTTPException(status_code=400, detail="Task is not a webhook trigger")
-    if row[6] != "active":
-        raise HTTPException(status_code=400, detail="Task is not active")
+    if row[6] != "enabled":
+        raise HTTPException(status_code=400, detail="Task is not enabled")
 
     # Authenticate
     secret = row[5]
@@ -2148,6 +2148,7 @@ async def get_agent_messages(agent_id: str, limit: int = 100):
         "SELECT m.id, m.role, m.content, m.created_at, m.metadata, m.status "
         "FROM messages m "
         "WHERE m.agent_id = ? AND m.visibility = 'visible' "
+        "  AND m.source NOT IN ('scheduled_task', 'bootstrap') "
         "ORDER BY m.created_at DESC LIMIT ?",
         (agent_id, limit),
     ) as cur:
@@ -2169,7 +2170,8 @@ async def hide_agent_messages(agent_id: str):
     db = await get_db()
     await db.execute(
         "UPDATE messages SET visibility = 'hidden' "
-        "WHERE visibility = 'visible' AND agent_id = ?",
+        "WHERE visibility = 'visible' AND agent_id = ? "
+        "  AND source NOT IN ('scheduled_task', 'bootstrap', 'system')",
         (agent_id,),
     )
     await db.commit()
@@ -2186,6 +2188,7 @@ async def get_older_messages(agent_id: str, before: str | None = None, limit: in
             "SELECT m.id, m.role, m.content, m.created_at, m.metadata, m.status "
             "FROM messages m "
             "WHERE m.agent_id = ? AND m.visibility = 'hidden' AND m.created_at < ? "
+            "  AND m.source NOT IN ('scheduled_task', 'bootstrap') "
             "ORDER BY m.created_at DESC LIMIT ?",
             (agent_id, before, limit),
         ) as cur:
@@ -2195,6 +2198,7 @@ async def get_older_messages(agent_id: str, before: str | None = None, limit: in
             "SELECT m.id, m.role, m.content, m.created_at, m.metadata, m.status "
             "FROM messages m "
             "WHERE m.agent_id = ? AND m.visibility = 'hidden' "
+            "  AND m.source NOT IN ('scheduled_task', 'bootstrap') "
             "ORDER BY m.created_at DESC LIMIT ?",
             (agent_id, limit),
         ) as cur:
@@ -2215,13 +2219,34 @@ async def get_older_messages(agent_id: str, before: str | None = None, limit: in
     if oldest_ts:
         async with db.execute(
             "SELECT 1 FROM messages "
-            "WHERE agent_id = ? AND visibility = 'hidden' AND created_at < ? "
+            "WHERE agent_id = ? AND visibility = 'hidden' "
+            "  AND source NOT IN ('scheduled_task', 'bootstrap') "
+            "  AND created_at < ? "
             "LIMIT 1",
             (agent_id, oldest_ts),
         ) as cur:
             has_more = await cur.fetchone() is not None
 
     return {"messages": messages, "has_more": has_more}
+
+
+@router.get("/agents/{agent_id}/messages/scheduled")
+async def get_scheduled_messages(agent_id: str, limit: int = 50):
+    """Return scheduled task messages for the schedules view."""
+    db = await get_db()
+    async with db.execute(
+        "SELECT m.id, m.role, m.content, m.created_at, m.metadata, m.status "
+        "FROM messages m "
+        "WHERE m.agent_id = ? AND m.source = 'scheduled_task' "
+        "ORDER BY m.created_at DESC LIMIT ?",
+        (agent_id, limit),
+    ) as cur:
+        rows = await cur.fetchall()
+    return [
+        {"id": r[0], "role": r[1], "content": r[2],
+         "created_at": r[3], "metadata": r[4], "status": r[5]}
+        for r in reversed(rows)
+    ]
 
 
 @router.get("/agents/{agent_id}/messages/{message_id}")
@@ -2851,6 +2876,7 @@ async def websocket_endpoint(ws: WebSocket):
         "SELECT id, role, content, created_at, metadata, status "
         "FROM messages "
         "WHERE agent_id = ? AND visibility = 'visible' "
+        "  AND source NOT IN ('scheduled_task', 'bootstrap') "
         "ORDER BY created_at DESC LIMIT 100",
         (agent_id,),
     ) as cur:

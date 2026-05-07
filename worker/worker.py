@@ -15,7 +15,7 @@ os.umask(0o022)
 logger = logging.getLogger(__name__)
 
 from worker import db
-from worker.agent import run_query
+from worker.agent import run_query, run_scheduled_query
 
 WORKSPACE = Path("/workspace")
 INPUT_PATH = WORKSPACE / "input.json"
@@ -408,9 +408,38 @@ async def process_message(msg: dict[str, Any], conn) -> None:
         logger.warning("Skipping duplicate message %s", message_id)
         return
 
-    _current_agentic_task_id = msg.get("agentic_task_id")
-
     content = msg.get("content", "")
+
+    # --- Scheduled task: lightweight path, no context loading ---
+    if msg.get("source") == "scheduled_task":
+        saved_agentic_task_id = _current_agentic_task_id
+        _current_agentic_task_id = msg.get("agentic_task_id")
+
+        try:
+            _, _usage, response_text = await run_scheduled_query(
+                message_id, content, emit, conn,
+            )
+            emit({
+                "type": "complete",
+                "content": response_text,
+                "message_id": message_id,
+                "usage": _usage,
+            })
+        except Exception as e:
+            logger.error("Scheduled query error: %s", e)
+            emit({
+                "type": "system_error",
+                "error": str(e),
+                "fatal": False,
+                "message_id": message_id,
+            })
+        finally:
+            _current_agentic_task_id = saved_agentic_task_id
+            flush_responses()
+            _mark_processed(conn, message_id)
+        return
+
+    _current_agentic_task_id = msg.get("agentic_task_id")
     attachments: list[str] = msg.get("attachments", [])
     session_id_from_msg = msg.get("session_id", "")
     _orch_session_id = session_id_from_msg or _orch_session_id

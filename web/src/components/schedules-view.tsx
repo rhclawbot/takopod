@@ -172,7 +172,7 @@ export function SchedulesView() {
   }, [fetchSchedules, fetchAgents])
 
   const handleToggle = async (id: string, currentStatus: string) => {
-    const action = currentStatus === "active" ? "pause" : "resume"
+    const action = currentStatus === "enabled" ? "pause" : "resume"
     const res = await fetch(`/api/schedules/${id}/${action}`, { method: "POST" })
     if (res.ok) fetchSchedules()
   }
@@ -383,7 +383,7 @@ export function SchedulesView() {
                     <Badge variant="outline" className="text-[10px]">
                       {triggerLabel(s.trigger_type)}
                     </Badge>
-                    <Badge variant={s.status === "active" ? "default" : "secondary"}>
+                    <Badge variant={s.status === "enabled" ? "default" : "secondary"}>
                       {s.status}
                     </Badge>
                     {s.interval_seconds > 0 && (
@@ -425,7 +425,7 @@ export function SchedulesView() {
                     size="icon-sm"
                     onClick={() => handleToggle(s.id, s.status)}
                   >
-                    {s.status === "active" ? (
+                    {s.status === "enabled" ? (
                       <Pause className="size-3.5" />
                     ) : (
                       <Play className="size-3.5" />

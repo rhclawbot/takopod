@@ -268,7 +268,7 @@ async def _poll_agentic_tasks() -> None:
     async with db.execute(
         "SELECT id, agent_id, prompt, allowed_tools, interval_seconds, model, script "
         "FROM agentic_tasks "
-        "WHERE status = 'active' AND trigger_type = 'interval' "
+        "WHERE status = 'enabled' AND trigger_type = 'interval' "
         "  AND (last_executed_at IS NULL "
         "       OR last_executed_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', "
         "          '-' || interval_seconds || ' seconds'))",
@@ -301,7 +301,7 @@ async def _poll_agentic_tasks() -> None:
             "SELECT id, agent_id, prompt, allowed_tools, trigger_type, "
             "trigger_config, cursor, model "
             "FROM agentic_tasks "
-            "WHERE status = 'active' "
+            "WHERE status = 'enabled' "
             f"  AND trigger_type IN ({placeholders}) "
             "  AND (last_checked_at IS NULL "
             "       OR last_checked_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', "
@@ -396,6 +396,31 @@ async def _run_checker_task(
         _running_agentic.pop(task_id, None)
 
 
+async def _increment_retry_count(task_id: str) -> int:
+    """Increment retry_count and return the new value."""
+    db = await get_db()
+    await db.execute(
+        "UPDATE agentic_tasks SET retry_count = retry_count + 1 WHERE id = ?",
+        (task_id,),
+    )
+    await db.commit()
+    async with db.execute(
+        "SELECT retry_count FROM agentic_tasks WHERE id = ?", (task_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    return row[0] if row else 0
+
+
+async def _reset_retry_count(task_id: str) -> None:
+    """Reset retry_count to 0 on success or re-enable."""
+    db = await get_db()
+    await db.execute(
+        "UPDATE agentic_tasks SET retry_count = 0 WHERE id = ?",
+        (task_id,),
+    )
+    await db.commit()
+
+
 async def execute_agentic_task(
     task_id: str,
     agent_id: str,
@@ -437,6 +462,29 @@ async def execute_agentic_task(
         logger.info("Agentic task %s executed successfully", task_id[:8])
         success = not (last_result or "").startswith("Error:")
 
+        if not success:
+            retry_count = await _increment_retry_count(task_id)
+            if retry_count >= 3:
+                await db.execute(
+                    "UPDATE agentic_tasks SET status = 'disabled' WHERE id = ?",
+                    (task_id,),
+                )
+                await db.commit()
+                fail_content = f"Scheduled task disabled after {retry_count} consecutive failures. Last error: {last_result}"
+            else:
+                fail_content = f"Scheduled task failed ({retry_count}/3): {last_result}"
+
+            fail_msg_id = str(uuid.uuid4())
+            await db.execute(
+                "INSERT INTO messages (id, agent_id, role, content, metadata, source) "
+                "VALUES (?, ?, 'system', ?, ?, 'system')",
+                (fail_msg_id, agent_id, fail_content,
+                 json.dumps({"agentic_task_id": task_id})),
+            )
+            await db.commit()
+        else:
+            await _reset_retry_count(task_id)
+
     except Exception:
         logger.exception("Agentic task %s failed", task_id[:8])
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -447,8 +495,26 @@ async def execute_agentic_task(
                 (now, "Error: execution failed", task_id),
             )
             await db.commit()
+            retry_count = await _increment_retry_count(task_id)
+            if retry_count >= 3:
+                await db.execute(
+                    "UPDATE agentic_tasks SET status = 'disabled' WHERE id = ?",
+                    (task_id,),
+                )
+                await db.commit()
+            fail_msg_id = str(uuid.uuid4())
+            fail_content = f"Scheduled task failed ({retry_count}/3): Error: execution failed"
+            if retry_count >= 3:
+                fail_content = f"Scheduled task disabled after {retry_count} consecutive failures. Last error: execution failed"
+            await db.execute(
+                "INSERT INTO messages (id, agent_id, role, content, metadata, source) "
+                "VALUES (?, ?, 'system', ?, ?, 'system')",
+                (fail_msg_id, agent_id, fail_content,
+                 json.dumps({"agentic_task_id": task_id})),
+            )
+            await db.commit()
         except Exception:
-            pass
+            logger.exception("Circuit breaker DB update failed for task %s", task_id[:8])
     finally:
         if not _caller_managed:
             _running_agentic.pop(task_id, None)

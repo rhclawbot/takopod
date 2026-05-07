@@ -156,8 +156,8 @@ class GhApprovalManager:
             db = await get_db()
             await db.execute(
                 "INSERT OR IGNORE INTO messages "
-                "(id, agent_id, role, content, status, metadata, created_at) "
-                "VALUES (?, ?, 'assistant', ?, 'complete', ?, ?)",
+                "(id, agent_id, role, content, status, metadata, created_at, source) "
+                "VALUES (?, ?, 'assistant', ?, 'complete', ?, ?, 'system')",
                 (
                     message_id,
                     agent_id,

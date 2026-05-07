@@ -41,6 +41,8 @@ from worker.tools import (
     create_schedule_server,
     create_slack_thread_server,
 )
+from worker.tools.schedule import TOOL_NAMES as SCHEDULE_TOOL_NAMES
+from worker.tools.pipeline import TOOL_NAMES as PIPELINE_TOOL_NAMES
 
 WORKSPACE = Path("/workspace")
 MAX_TURNS = 25
@@ -269,6 +271,34 @@ async def _run_self_assessment(
         return ""
 
 
+def _build_mcp_servers(
+    conn: sqlite3.Connection | None = None,
+    *,
+    include_schedule: bool = True,
+    include_pipeline: bool = True,
+) -> tuple[dict[str, Any], list[str]]:
+    """Build MCP server dict and proxy tool name list."""
+    mcp_proxy_servers = create_mcp_proxy_servers()
+
+    mcp_servers: dict[str, Any] = {}
+    if include_schedule:
+        mcp_servers["schedule"] = create_schedule_server()
+    mcp_servers["slack_thread"] = create_slack_thread_server()
+    if include_pipeline:
+        mcp_servers["pipeline"] = create_pipeline_server()
+    if conn is not None:
+        memory_server = create_memory_server(conn)
+        if memory_server is not None:
+            mcp_servers["memory"] = memory_server
+
+    mcp_proxy_tool_names: list[str] = []
+    for server_name, proxy_server, proxy_tool_names in mcp_proxy_servers:
+        mcp_servers[server_name] = proxy_server
+        mcp_proxy_tool_names.extend(proxy_tool_names)
+
+    return mcp_servers, mcp_proxy_tool_names
+
+
 async def run_query(
     message_id: str,
     content: str,
@@ -335,27 +365,8 @@ async def run_query(
         })
         return {}
 
-    schedule_server = create_schedule_server()
-    slack_thread_server = create_slack_thread_server()
-    pipeline_server = create_pipeline_server()
-    mcp_proxy_servers = create_mcp_proxy_servers()
+    mcp_servers, mcp_proxy_tool_names = _build_mcp_servers(conn)
     builtin_tools, permission_mode = _load_tool_config()
-
-    memory_server = None
-    if conn is not None:
-        memory_server = create_memory_server(conn)
-
-    mcp_servers: dict[str, Any] = {
-        "schedule": schedule_server,
-        "slack_thread": slack_thread_server,
-        "pipeline": pipeline_server,
-    }
-    if memory_server is not None:
-        mcp_servers["memory"] = memory_server
-    mcp_proxy_tool_names: list[str] = []
-    for server_name, proxy_server, proxy_tool_names in mcp_proxy_servers:
-        mcp_servers[server_name] = proxy_server
-        mcp_proxy_tool_names.extend(proxy_tool_names)
 
     # Check if skills exist to enable the Skill tool
     skills_dir = WORKSPACE / ".claude" / "skills"
@@ -502,3 +513,119 @@ async def run_query(
     drain_pending()
 
     return captured_session_id, total_usage, full_text
+
+
+async def run_scheduled_query(
+    message_id: str,
+    content: str,
+    emit: Emit,
+    conn: sqlite3.Connection | None = None,
+) -> tuple[str | None, dict[str, Any], str]:
+    """Run a lightweight query for scheduled tasks with minimal context.
+
+    No memory, no search results, no session resumption, no continuation summary.
+    System prompt is built from CLAUDE.md only.
+    """
+    system_prompt = ""
+    claude_md = WORKSPACE / "CLAUDE.md"
+    if claude_md.is_file():
+        system_prompt = claude_md.read_text().strip()
+
+    async def on_pre_tool(input_data, tool_use_id, context):
+        tool_name = input_data.get("tool_name", "unknown")
+        emit({
+            "type": "tool_call",
+            "tool_name": tool_name,
+            "tool_input": input_data.get("tool_input", {}),
+            "tool_call_id": tool_use_id,
+            "message_id": message_id,
+        })
+        return {}
+
+    async def on_post_tool(input_data, tool_use_id, context):
+        output = input_data.get("output", "")
+        if isinstance(output, dict):
+            output = json.dumps(output)
+        output_str = str(output)
+        tool_name = input_data.get("tool_name", "unknown")
+        if tool_name in ("Write", "Edit", "Bash"):
+            os.sync()
+        emit({
+            "type": "tool_result",
+            "tool_call_id": tool_use_id,
+            "output": output_str[:4000],
+            "message_id": message_id,
+        })
+        return {}
+
+    # Exclude schedule and pipeline servers to prevent side effects
+    mcp_servers, mcp_proxy_tool_names = _build_mcp_servers(
+        conn, include_schedule=False, include_pipeline=False,
+    )
+    builtin_tools, permission_mode = _load_tool_config()
+
+    excluded_tools = set(SCHEDULE_TOOL_NAMES + PIPELINE_TOOL_NAMES)
+    filtered_builtins = [t for t in BUILTIN_TOOL_NAMES if t not in excluded_tools]
+    allowed = [*builtin_tools, *filtered_builtins, *mcp_proxy_tool_names]
+
+    def _on_cli_stderr(line: str) -> None:
+        logger.warning("CLI stderr: %s", line.rstrip())
+
+    options = ClaudeAgentOptions(
+        cwd=str(WORKSPACE),
+        allowed_tools=allowed,
+        setting_sources=["project"],
+        permission_mode=permission_mode,
+        system_prompt=system_prompt,
+        max_turns=MAX_TURNS,
+        mcp_servers=mcp_servers,
+        stderr=_on_cli_stderr,
+        hooks={
+            "PreToolUse": [HookMatcher(matcher=".*", hooks=[on_pre_tool])],
+            "PostToolUse": [HookMatcher(matcher=".*", hooks=[on_post_tool])],
+        },
+    )
+
+    total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+    full_text_parts: list[str] = []
+    seq = 0
+    last_emitted_text = ""
+
+    emit({"type": "status", "status": "generating", "message_id": message_id})
+
+    async for msg in query(prompt=content, options=options):
+        if isinstance(msg, AssistantMessage):
+            if msg.usage:
+                total_usage["input_tokens"] += msg.usage.get("input_tokens", 0)
+                total_usage["output_tokens"] += msg.usage.get("output_tokens", 0)
+
+            for block in msg.content:
+                if isinstance(block, TextBlock):
+                    seq += 1
+                    full_text_parts.append(block.text)
+                    emit({
+                        "type": "token",
+                        "content": block.text,
+                        "message_id": message_id,
+                        "seq": seq,
+                    })
+            current_text = "\n\n".join(full_text_parts)
+            if current_text != last_emitted_text:
+                emit({
+                    "type": "assistant_message",
+                    "content": current_text,
+                    "message_id": message_id,
+                    "seq": seq,
+                })
+                last_emitted_text = current_text
+
+        elif isinstance(msg, ResultMessage):
+            logger.info("Scheduled query complete")
+
+    full_text = "\n\n".join(full_text_parts)
+
+    # Do NOT emit 'complete' — the caller handles it
+    from worker.worker import drain_pending
+    drain_pending()
+
+    return None, total_usage, full_text
