@@ -21,3 +21,5 @@ mynotes/
 myagents/
 .DS_Store
 .env
+.agents/
+skills-lock.json
