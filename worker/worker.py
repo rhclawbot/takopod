@@ -311,7 +311,7 @@ async def process_message(msg: dict[str, Any], conn) -> None:
         args = msg.get("args", [])
         timeout = msg.get("timeout", 60)
 
-        if not script_path or ".." in script_path or script_path.startswith("/"):
+        if not script_path or script_path.startswith("/"):
             emit({
                 "type": "script_result",
                 "script": script_path,
@@ -319,11 +319,25 @@ async def process_message(msg: dict[str, Any], conn) -> None:
                 "stderr": f"Invalid script path: {script_path}",
                 "message_id": message_id,
             })
+            flush_responses()
             if message_id:
                 _mark_processed(conn, message_id)
             return
 
-        full_path = WORKSPACE / script_path
+        full_path = (WORKSPACE / script_path).resolve()
+        if not full_path.is_relative_to(WORKSPACE.resolve()):
+            emit({
+                "type": "script_result",
+                "script": script_path,
+                "exit_code": 1,
+                "stderr": f"Script path escapes workspace: {script_path}",
+                "message_id": message_id,
+            })
+            flush_responses()
+            if message_id:
+                _mark_processed(conn, message_id)
+            return
+
         if not full_path.is_file():
             emit({
                 "type": "script_result",
@@ -332,6 +346,7 @@ async def process_message(msg: dict[str, Any], conn) -> None:
                 "stderr": f"Script not found: {script_path}",
                 "message_id": message_id,
             })
+            flush_responses()
             if message_id:
                 _mark_processed(conn, message_id)
             return
@@ -374,6 +389,7 @@ async def process_message(msg: dict[str, Any], conn) -> None:
             "stderr": stderr_text,
             "message_id": message_id,
         })
+        flush_responses()
         if message_id:
             _mark_processed(conn, message_id)
         return

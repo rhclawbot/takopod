@@ -1,6 +1,16 @@
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { ChevronDown, ChevronRight, FileCode, MessageSquare, Terminal } from "lucide-react"
 import type { QueueStatusFrame } from "@/lib/types"
+
+function formatElapsed(createdAt: string): string {
+  const ts = new Date(createdAt).getTime()
+  if (isNaN(ts)) return ""
+  const elapsed = Math.max(0, Math.floor((Date.now() - ts) / 1000))
+  if (elapsed < 60) return `${elapsed}s`
+  const mins = Math.floor(elapsed / 60)
+  const secs = elapsed % 60
+  return `${mins}m${secs > 0 ? ` ${secs}s` : ""}`
+}
 
 function summarizeItems(status: QueueStatusFrame): string {
   const items = status.items ?? []
@@ -51,8 +61,15 @@ function itemLabel(item: { payload_type: string; script?: string | null }): stri
 
 export function QueueActivityBar({ status }: { status: QueueStatusFrame }) {
   const [expanded, setExpanded] = useState(false)
+  const [, tick] = useState(0)
   const items = status.items ?? []
   const hasDetails = items.length > 0
+
+  useEffect(() => {
+    if (!expanded || items.length === 0) return
+    const id = setInterval(() => tick((n) => n + 1), 1000)
+    return () => clearInterval(id)
+  }, [expanded, items.length])
 
   return (
     <div className="border-t text-xs text-muted-foreground">
@@ -74,6 +91,7 @@ export function QueueActivityBar({ status }: { status: QueueStatusFrame }) {
             <div key={item.message_id} className="flex items-center gap-2 py-0.5">
               <ItemIcon type={item.payload_type} />
               <span className="flex-1 truncate">{itemLabel(item)}</span>
+              <span className="tabular-nums text-[10px]">{formatElapsed(item.created_at)}</span>
               <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
                 item.status === "IN-FLIGHT"
                   ? "bg-primary/10 text-primary"

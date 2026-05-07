@@ -461,6 +461,7 @@ async def execute_script_task(
     task_id: str,
     agent_id: str,
     script_path: str,
+    script_timeout: int = 60,
 ) -> None:
     """Execute a periodic script task via run_script message."""
     from orchestrator.ipc import store_script_message
@@ -471,10 +472,14 @@ async def execute_script_task(
 
     try:
         await ensure_worker_headless(agent_id)
-        await store_script_message(agent_id, message_id, script_path, task_id)
+        await store_script_message(
+            agent_id, message_id, script_path, task_id, timeout=script_timeout,
+        )
 
-        # Wait for the polling loop to flush and process the script
-        await _wait_for_script_completion(message_id, timeout_seconds=120)
+        # Buffer: script timeout + 60s for flush/IPC overhead
+        await _wait_for_script_completion(
+            message_id, timeout_seconds=script_timeout + 60,
+        )
 
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         await db.execute(
@@ -519,7 +524,9 @@ async def _wait_for_script_completion(
         if row[0] == 0:
             return
 
-    logger.warning("Script message %s timed out waiting for completion", message_id[:8])
+    raise TimeoutError(
+        f"Script message {message_id[:8]} timed out after {timeout_seconds}s"
+    )
 
 
 async def _apply_backoff(task_id: str, activity_signaled: set[str]) -> None:

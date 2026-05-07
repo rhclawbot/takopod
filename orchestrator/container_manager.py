@@ -161,13 +161,16 @@ async def _get_shared_skill_mounts(agent_id: str) -> list[str]:
         rows = await cur.fetchall()
     skill_ids = {row[0] for row in rows}
 
+    fm_cache: dict[str, dict] = {}
     for sid in _scan_skills_dir(BUILTIN_SKILLS_DIR):
-        if _is_always_enabled_skill(sid):
+        fm = _parse_skill_frontmatter(sid)
+        fm_cache[sid] = fm
+        if fm.get("always_enabled"):
             skill_ids.add(sid)
 
     mount_args: list[str] = []
     for skill_id in sorted(skill_ids):
-        fm = _parse_skill_frontmatter(skill_id)
+        fm = fm_cache.get(skill_id) or _parse_skill_frontmatter(skill_id)
         if fm.get("shared_data"):
             shared_host = (SHARED_DATA_DIR / skill_id).resolve()
             shared_host.mkdir(parents=True, exist_ok=True)
