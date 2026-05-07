@@ -171,6 +171,7 @@ async def _start_mcp_manager(host_dir: Path, agent_id: str) -> McpServerManager 
         name = row[0]
         env = json.loads(row[6])
         servers[name] = {
+            "transport": row[1],
             "command": row[2],
             "args": json.loads(row[3]),
             "url": row[4],
