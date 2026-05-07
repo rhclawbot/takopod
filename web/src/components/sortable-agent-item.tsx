@@ -40,7 +40,7 @@ export function SortableAgentItem({
         <div
           ref={setActivatorNodeRef}
           {...listeners}
-          className="shrink-0 cursor-grab touch-none opacity-0 group-hover/menu-item:opacity-60 hover:!opacity-100 transition-opacity -ml-0.5 mr-0.5"
+          className="shrink-0 cursor-grab touch-none opacity-0 group-hover/menu-item:opacity-60 hover:!opacity-100 transition-opacity -ml-0.5 mr-0.5 group-data-[collapsible=icon]:hidden"
           aria-label={`Drag to reorder ${agent.name}`}
           role="button"
           tabIndex={-1}
