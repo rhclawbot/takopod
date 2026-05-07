@@ -16,6 +16,7 @@ import { ErrorNotification, SessionEndedBanner, SystemErrorNotification } from "
 import { ContainerStatusPanel } from "@/components/container-status-panel"
 import { McpStatusPanel } from "@/components/mcp-status-panel"
 import { SkillsStatusPanel } from "@/components/skills-status-panel"
+import { QueueActivityBar } from "@/components/queue-activity-bar"
 import { QueueStatusPanel } from "@/components/queue-status-panel"
 import { FileBrowserPanel } from "@/components/file-browser-panel"
 import { Button } from "@/components/ui/button"
@@ -283,10 +284,7 @@ export function App() {
                     <ChatMessageList messages={messages} hasOlderMessages={hasOlderMessages} loadingOlder={loadingOlder} onLoadOlder={loadOlderMessages} onApprovalRespond={sendApprovalResponse} onDeleteMessage={deleteMessage} />
                     {(queueStatus.queued > 0 || queueStatus.in_flight > 0) &&
                       !messages.some((m) => m.status === "streaming") && (
-                        <div className="flex items-center gap-2 border-t px-4 py-2 text-xs text-muted-foreground">
-                          <span className="inline-block size-2 animate-pulse rounded-full bg-primary" />
-                          Processing...
-                        </div>
+                        <QueueActivityBar status={queueStatus} />
                       )}
                     <ErrorNotification error={error} />
                     <SystemErrorNotification error={systemError} />

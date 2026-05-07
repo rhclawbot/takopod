@@ -67,7 +67,7 @@ export function SettingsView() {
 
   const ollamaValue = settings["ollama_enabled"]
   const filteredSettings = Object.entries(settings).filter(
-    ([key]) => key !== "ollama_enabled" && !key.startsWith("slack_polling_") && !key.startsWith("default_container_") && key !== "session_history_window_size",
+    ([key]) => key !== "ollama_enabled" && !key.startsWith("slack_polling_") && !key.startsWith("default_container_") && key !== "session_history_window_size" && key !== "idle_timeout_seconds" && key !== "inflight_hard_timeout",
   )
 
   return (
@@ -236,6 +236,31 @@ export function SettingsView() {
                 helpText="e.g. 1, 2, 4"
                 value={settings["default_container_cpus"] ?? ""}
                 onSaved={(v) => setSettings((prev) => ({ ...prev, default_container_cpus: v }))}
+              />
+            </div>
+          </div>
+          {/* Container Lifecycle */}
+          <div className="pt-4">
+            <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground pb-2">Container Lifecycle</div>
+            <p className="text-xs text-muted-foreground pb-3">
+              Default timeout values for new agent containers. Per-agent overrides can be set in each agent's settings.
+            </p>
+            <div className="space-y-3">
+              <ContainerDefaultInput
+                label="Idle Timeout (seconds)"
+                settingKey="idle_timeout_seconds"
+                placeholder="300"
+                helpText="How long an idle container runs before shutdown"
+                value={settings["idle_timeout_seconds"] ?? ""}
+                onSaved={(v) => setSettings((prev) => ({ ...prev, idle_timeout_seconds: v }))}
+              />
+              <ContainerDefaultInput
+                label="Hard Timeout (seconds)"
+                settingKey="inflight_hard_timeout"
+                placeholder="600"
+                helpText="Maximum time for in-flight messages before forced container reap"
+                value={settings["inflight_hard_timeout"] ?? ""}
+                onSaved={(v) => setSettings((prev) => ({ ...prev, inflight_hard_timeout: v }))}
               />
             </div>
           </div>

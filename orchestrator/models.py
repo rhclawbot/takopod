@@ -32,10 +32,18 @@ class UserMessageFrame(BaseModel):
     model: str | None = None
 
 
+class QueueItem(BaseModel):
+    message_id: str
+    payload_type: str
+    status: str
+    script: str | None = None
+    created_at: str
+
 class QueueStatusFrame(BaseModel):
     type: Literal["queue_status"] = "queue_status"
     queued: int
     in_flight: int
+    items: list[QueueItem] = []
 
 
 class ErrorFrame(BaseModel):
@@ -65,6 +73,8 @@ class AgentResponse(BaseModel):
     container_status: str | None = None
     container_memory: str = "2g"
     container_cpus: str = "2"
+    idle_timeout_seconds: int = 300
+    inflight_hard_timeout: int = 600
 
 
 class AgentDetailResponse(AgentResponse):
@@ -74,6 +84,8 @@ class AgentDetailResponse(AgentResponse):
 class UpdateAgentRequest(BaseModel):
     container_memory: str | None = None
     container_cpus: str | None = None
+    idle_timeout_seconds: int | None = None
+    inflight_hard_timeout: int | None = None
 
     @field_validator("container_memory")
     @classmethod
@@ -84,6 +96,13 @@ class UpdateAgentRequest(BaseModel):
     @classmethod
     def validate_cpus(cls, v: str | None) -> str | None:
         return _validate_cpus(v) if v is not None else None
+
+    @field_validator("idle_timeout_seconds", "inflight_hard_timeout")
+    @classmethod
+    def validate_timeout(cls, v: int | None) -> int | None:
+        if v is not None and v < 60:
+            raise ValueError("Timeout must be at least 60 seconds")
+        return v
 
 
 class SystemErrorFrame(BaseModel):

@@ -266,7 +266,7 @@ async def _poll_agentic_tasks() -> None:
 
     # --- Interval tasks (existing logic) ---
     async with db.execute(
-        "SELECT id, agent_id, prompt, allowed_tools, interval_seconds, model "
+        "SELECT id, agent_id, prompt, allowed_tools, interval_seconds, model, script "
         "FROM agentic_tasks "
         "WHERE status = 'active' AND trigger_type = 'interval' "
         "  AND (last_executed_at IS NULL "
@@ -275,14 +275,20 @@ async def _poll_agentic_tasks() -> None:
     ) as cur:
         interval_rows = await cur.fetchall()
 
-    for task_id, agent_id, prompt, allowed_tools_json, interval_seconds, model in interval_rows:
+    for task_id, agent_id, prompt, allowed_tools_json, interval_seconds, model, script in interval_rows:
         if task_id in _running_agentic:
             continue
-        allowed_tools = json.loads(allowed_tools_json) if allowed_tools_json else []
-        task = asyncio.create_task(
-            execute_agentic_task(task_id, agent_id, prompt, allowed_tools, model=model),
-            name=f"agentic-{task_id[:8]}",
-        )
+        if script:
+            task = asyncio.create_task(
+                execute_script_task(task_id, agent_id, script),
+                name=f"script-{task_id[:8]}",
+            )
+        else:
+            allowed_tools = json.loads(allowed_tools_json) if allowed_tools_json else []
+            task = asyncio.create_task(
+                execute_agentic_task(task_id, agent_id, prompt, allowed_tools, model=model),
+                name=f"agentic-{task_id[:8]}",
+            )
         _running_agentic[task_id] = task
 
     # --- Checker-based tasks (file_watch, github_pr, github_issues, slack_channel) ---
@@ -449,6 +455,71 @@ async def execute_agentic_task(
             await _apply_backoff(task_id, _activity_signaled)
 
     return success
+
+
+async def execute_script_task(
+    task_id: str,
+    agent_id: str,
+    script_path: str,
+) -> None:
+    """Execute a periodic script task via run_script message."""
+    from orchestrator.ipc import store_script_message
+    from orchestrator.routes import ensure_worker_headless
+
+    db = await get_db()
+    message_id = str(uuid.uuid4())
+
+    try:
+        await ensure_worker_headless(agent_id)
+        await store_script_message(agent_id, message_id, script_path, task_id)
+
+        # Wait for the polling loop to flush and process the script
+        await _wait_for_script_completion(message_id, timeout_seconds=120)
+
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        await db.execute(
+            "UPDATE agentic_tasks SET last_executed_at = ? WHERE id = ?",
+            (now, task_id),
+        )
+        await db.commit()
+        logger.info("Script task %s executed successfully", task_id[:8])
+
+    except Exception:
+        logger.exception("Script task %s failed", task_id[:8])
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        try:
+            await db.execute(
+                "UPDATE agentic_tasks SET last_executed_at = ?, last_result = ? "
+                "WHERE id = ?",
+                (now, "Error: script execution failed", task_id),
+            )
+            await db.commit()
+        except Exception:
+            pass
+    finally:
+        _running_agentic.pop(task_id, None)
+
+
+async def _wait_for_script_completion(
+    message_id: str,
+    timeout_seconds: int = 120,
+) -> None:
+    """Wait until the script message is no longer IN-FLIGHT."""
+    db = await get_db()
+    deadline = time.monotonic() + timeout_seconds
+
+    while time.monotonic() < deadline:
+        await asyncio.sleep(2.0)
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_queue "
+            "WHERE id = ? AND status IN ('QUEUED', 'IN-FLIGHT')",
+            (message_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row[0] == 0:
+            return
+
+    logger.warning("Script message %s timed out waiting for completion", message_id[:8])
 
 
 async def _apply_backoff(task_id: str, activity_signaled: set[str]) -> None:
@@ -651,7 +722,7 @@ async def _check_worker_liveness() -> None:
 
 
 async def _reap_idle_workers() -> None:
-    """Shut down worker containers idle longer than IDLE_TIMEOUT_SECONDS.
+    """Shut down worker containers idle longer than their per-agent timeout.
 
     Flow per container: send shutdown command via input.json -> wait up to 60s
     for clean exit -> force-kill on timeout.
@@ -662,18 +733,28 @@ async def _reap_idle_workers() -> None:
     active_workers = get_active_workers()
     workers_lock = get_workers_lock()
     db = await get_db()
-    cutoff = time.strftime(
-        "%Y-%m-%dT%H:%M:%SZ",
-        time.gmtime(time.time() - IDLE_TIMEOUT_SECONDS),
-    )
+
+    # Query idle containers with their per-agent timeout settings
     async with db.execute(
-        "SELECT id, agent_id FROM agent_containers "
-        "WHERE status = 'idle' AND last_activity < ?",
-        (cutoff,),
+        "SELECT c.id, c.agent_id, c.last_activity, "
+        "a.idle_timeout_seconds, a.inflight_hard_timeout "
+        "FROM agent_containers c "
+        "JOIN agents a ON a.id = c.agent_id "
+        "WHERE c.status = 'idle'",
     ) as cur:
         rows = await cur.fetchall()
 
-    for record_id, agent_id in rows:
+    candidates = []
+    for record_id, agent_id, last_activity, idle_timeout, hard_timeout in rows:
+        if not last_activity:
+            candidates.append((record_id, agent_id, hard_timeout))
+            continue
+        activity_dt = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
+        idle_seconds = (datetime.now(timezone.utc) - activity_dt).total_seconds()
+        if idle_seconds >= idle_timeout:
+            candidates.append((record_id, agent_id, hard_timeout))
+
+    for record_id, agent_id, hard_timeout in candidates:
         container_name = f"takopod-{agent_id[:8]}"
 
         # Skip containers that still have messages being processed,
@@ -697,7 +778,7 @@ async def _reap_idle_workers() -> None:
                     oldest_flushed.replace("Z", "+00:00")
                 )
                 age = (datetime.now(timezone.utc) - flushed_dt).total_seconds()
-                if age < INFLIGHT_HARD_TIMEOUT:
+                if age < hard_timeout:
                     logger.debug(
                         "Skipping reap of %s: %d in-flight message(s), "
                         "oldest flushed %ds ago",
@@ -707,7 +788,7 @@ async def _reap_idle_workers() -> None:
                 logger.warning(
                     "In-flight message for %s exceeded hard timeout "
                     "(%ds > %ds), proceeding with reap",
-                    container_name, int(age), INFLIGHT_HARD_TIMEOUT,
+                    container_name, int(age), hard_timeout,
                 )
 
         reason = "Session ended due to inactivity"

@@ -305,6 +305,79 @@ async def process_message(msg: dict[str, Any], conn) -> None:
         flush_responses()
         sys.exit(0)
 
+    if msg_type == "run_script":
+        message_id = msg.get("message_id", "")
+        script_path = msg.get("script", "")
+        args = msg.get("args", [])
+        timeout = msg.get("timeout", 60)
+
+        if not script_path or ".." in script_path or script_path.startswith("/"):
+            emit({
+                "type": "script_result",
+                "script": script_path,
+                "exit_code": 1,
+                "stderr": f"Invalid script path: {script_path}",
+                "message_id": message_id,
+            })
+            if message_id:
+                _mark_processed(conn, message_id)
+            return
+
+        full_path = WORKSPACE / script_path
+        if not full_path.is_file():
+            emit({
+                "type": "script_result",
+                "script": script_path,
+                "exit_code": 1,
+                "stderr": f"Script not found: {script_path}",
+                "message_id": message_id,
+            })
+            if message_id:
+                _mark_processed(conn, message_id)
+            return
+
+        logger.info("Running script: %s (timeout=%ds)", script_path, timeout)
+        exit_code = 1
+        stderr_text = ""
+        try:
+            cmd = [sys.executable, str(full_path)] + args
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(WORKSPACE),
+            )
+            _, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout,
+            )
+            exit_code = proc.returncode or 0
+            stderr_text = (stderr_bytes or b"").decode(errors="replace")[:4096]
+        except asyncio.TimeoutError:
+            exit_code = -1
+            stderr_text = f"Script timed out after {timeout}s"
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+        except Exception as e:
+            exit_code = 1
+            stderr_text = str(e)[:4096]
+
+        log_fn = logger.info if exit_code == 0 else logger.warning
+        log_fn("Script %s finished: exit_code=%d", script_path, exit_code)
+
+        emit({
+            "type": "script_result",
+            "script": script_path,
+            "exit_code": exit_code,
+            "stderr": stderr_text,
+            "message_id": message_id,
+        })
+        if message_id:
+            _mark_processed(conn, message_id)
+        return
+
     if msg_type != "user_message":
         logger.warning("Unknown message type: %s", msg_type)
         return

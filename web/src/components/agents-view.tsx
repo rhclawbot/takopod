@@ -48,6 +48,7 @@ import {
   Server,
   Settings,
   Sparkles,
+  Timer,
   Trash2,
 } from "lucide-react"
 import { AgentIcon } from "@/components/agent-icon"
@@ -323,6 +324,8 @@ function ContainerResourcesPanel({
 }) {
   const [memory, setMemory] = useState(detail.container_memory ?? "2g")
   const [cpus, setCpus] = useState(detail.container_cpus ?? "2")
+  const [idleTimeout, setIdleTimeout] = useState(String(detail.idle_timeout_seconds ?? 300))
+  const [hardTimeout, setHardTimeout] = useState(String(detail.inflight_hard_timeout ?? 600))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState("")
   const [saved, setSaved] = useState(false)
@@ -330,19 +333,29 @@ function ContainerResourcesPanel({
   useEffect(() => {
     setMemory(detail.container_memory ?? "2g")
     setCpus(detail.container_cpus ?? "2")
-  }, [detail.container_memory, detail.container_cpus])
+    setIdleTimeout(String(detail.idle_timeout_seconds ?? 300))
+    setHardTimeout(String(detail.inflight_hard_timeout ?? 600))
+  }, [detail.container_memory, detail.container_cpus, detail.idle_timeout_seconds, detail.inflight_hard_timeout])
 
-  const dirty = memory !== (detail.container_memory ?? "2g") || cpus !== (detail.container_cpus ?? "2")
+  const dirty = memory !== (detail.container_memory ?? "2g")
+    || cpus !== (detail.container_cpus ?? "2")
+    || idleTimeout !== String(detail.idle_timeout_seconds ?? 300)
+    || hardTimeout !== String(detail.inflight_hard_timeout ?? 600)
 
   const handleSave = async () => {
     setSaving(true)
     setError("")
     setSaved(false)
     try {
+      const body: Record<string, unknown> = { container_memory: memory, container_cpus: cpus }
+      const it = parseInt(idleTimeout, 10)
+      const ht = parseInt(hardTimeout, 10)
+      if (!isNaN(it)) body.idle_timeout_seconds = it
+      if (!isNaN(ht)) body.inflight_hard_timeout = ht
       const res = await fetch(`/api/agents/${agentId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ container_memory: memory, container_cpus: cpus }),
+        body: JSON.stringify(body),
       })
       if (res.ok) {
         const data = await res.json()
@@ -365,7 +378,7 @@ function ContainerResourcesPanel({
       </h3>
       <div className="rounded-md border px-4 py-4">
         <p className="text-xs text-muted-foreground mb-4">
-          CPU and memory limits for this agent's container. Changes take effect on next container start.
+          Resource limits and lifecycle settings. Changes take effect on next container start.
         </p>
         <div className="grid grid-cols-2 gap-4">
           <div>
@@ -393,6 +406,32 @@ function ContainerResourcesPanel({
               className="h-8 text-sm"
             />
             <span className="text-[11px] text-muted-foreground">e.g. 1, 2, 4</span>
+          </div>
+          <div>
+            <label className="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              <Timer className="size-3.5 text-muted-foreground" />
+              Idle Timeout (s)
+            </label>
+            <Input
+              value={idleTimeout}
+              onChange={(e) => { setIdleTimeout(e.target.value); setError(""); setSaved(false) }}
+              placeholder="300"
+              className="h-8 text-sm"
+            />
+            <span className="text-[11px] text-muted-foreground">Seconds before idle container shutdown</span>
+          </div>
+          <div>
+            <label className="mb-1.5 flex items-center gap-1.5 text-sm font-medium">
+              <Timer className="size-3.5 text-muted-foreground" />
+              Hard Timeout (s)
+            </label>
+            <Input
+              value={hardTimeout}
+              onChange={(e) => { setHardTimeout(e.target.value); setError(""); setSaved(false) }}
+              placeholder="600"
+              className="h-8 text-sm"
+            />
+            <span className="text-[11px] text-muted-foreground">Max time for in-flight messages</span>
           </div>
         </div>
         {error && <p className="mt-2 text-xs text-destructive">{error}</p>}

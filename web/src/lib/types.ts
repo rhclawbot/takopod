@@ -6,10 +6,19 @@ export interface UserMessageFrame {
   model?: string
 }
 
+export interface QueueItem {
+  message_id: string
+  payload_type: string
+  status: string
+  script?: string | null
+  created_at: string
+}
+
 export interface QueueStatusFrame {
   type: "queue_status"
   queued: number
   in_flight: number
+  items?: QueueItem[]
 }
 
 export interface ErrorFrame {
@@ -115,6 +124,8 @@ export interface Agent {
   container_status?: string | null
   container_memory?: string
   container_cpus?: string
+  idle_timeout_seconds?: number
+  inflight_hard_timeout?: number
 }
 
 export interface ModelOption {

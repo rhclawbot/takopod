@@ -110,6 +110,7 @@ def create_agent_workspace(
 
 BUILTIN_SKILLS_DIR = Path("skills")
 USER_SKILLS_DIR = Path("data/skills")
+SHARED_DATA_DIR = Path("data/shared")
 REGISTRY_MANIFEST = ".registry.json"
 
 
@@ -130,8 +131,8 @@ def _scan_skills_dir(sdir: Path) -> list[str]:
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
 
 
-def _is_always_enabled_skill(skill_id: str) -> bool:
-    """Check if a skill has always_enabled: true in its frontmatter."""
+def _parse_skill_frontmatter(skill_id: str) -> dict:
+    """Parse YAML frontmatter from a skill's SKILL.md, returning all fields."""
     for sdir in (USER_SKILLS_DIR, BUILTIN_SKILLS_DIR):
         for path in (sdir / skill_id / "SKILL.md", sdir / f"{skill_id}.md"):
             if path.is_file():
@@ -140,9 +141,40 @@ def _is_always_enabled_skill(skill_id: str) -> bool:
                     import yaml
                     data = yaml.safe_load(m.group(1))
                     if isinstance(data, dict):
-                        return bool(data.get("always_enabled", False))
-                return False
-    return False
+                        return data
+                return {}
+    return {}
+
+
+def _is_always_enabled_skill(skill_id: str) -> bool:
+    """Check if a skill has always_enabled: true in its frontmatter."""
+    return bool(_parse_skill_frontmatter(skill_id).get("always_enabled", False))
+
+
+async def _get_shared_skill_mounts(agent_id: str) -> list[str]:
+    """Return podman -v args for skills with shared_data: true."""
+    db = await get_db()
+    async with db.execute(
+        "SELECT skill_id FROM agent_skills WHERE agent_id = ?",
+        (agent_id,),
+    ) as cur:
+        rows = await cur.fetchall()
+    skill_ids = {row[0] for row in rows}
+
+    for sid in _scan_skills_dir(BUILTIN_SKILLS_DIR):
+        if _is_always_enabled_skill(sid):
+            skill_ids.add(sid)
+
+    mount_args: list[str] = []
+    for skill_id in sorted(skill_ids):
+        fm = _parse_skill_frontmatter(skill_id)
+        if fm.get("shared_data"):
+            shared_host = (SHARED_DATA_DIR / skill_id).resolve()
+            shared_host.mkdir(parents=True, exist_ok=True)
+            mount_args.extend([
+                "-v", f"{shared_host}:/workspace/shared/{skill_id}:Z",
+            ])
+    return mount_args
 
 
 def _find_skill_source(skill_id: str) -> Path | None:
@@ -230,6 +262,46 @@ async def sync_agent_skills(agent_id: str, host_dir: Path) -> None:
 
     manifest_path.write_text(json.dumps(sorted(active_ids)))
     logger.debug("Synced %d registry skills for agent %s", len(active_ids), agent_id)
+
+    # Manage periodic script agentic tasks for added/removed skills
+    added_skills = active_ids - previous_registry
+    removed_skills = previous_registry - active_ids
+
+    for skill_id in removed_skills:
+        await db.execute(
+            "DELETE FROM agentic_tasks WHERE agent_id = ? AND source_skill_id = ?",
+            (agent_id, skill_id),
+        )
+    if removed_skills:
+        await db.commit()
+
+    for skill_id in added_skills:
+        fm = _parse_skill_frontmatter(skill_id)
+        periodic_scripts = fm.get("periodic_scripts")
+        if not isinstance(periodic_scripts, list):
+            continue
+        for entry in periodic_scripts:
+            if not isinstance(entry, dict):
+                continue
+            script = entry.get("script")
+            interval = entry.get("interval")
+            if not script or not interval:
+                continue
+            script_path = f".claude/skills/{skill_id}/{script}"
+            task_id = str(uuid.uuid4())
+            await db.execute(
+                "INSERT INTO agentic_tasks "
+                "(id, agent_id, prompt, interval_seconds, script, source_skill_id, trigger_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'interval')",
+                (task_id, agent_id, f"Run script {script_path}", int(interval),
+                 script_path, skill_id),
+            )
+            logger.info(
+                "Created periodic script task for agent %s: %s every %ds",
+                agent_id[:8], script_path, int(interval),
+            )
+    if added_skills:
+        await db.commit()
 
 
 async def write_workspace_settings(host_dir: Path) -> None:
@@ -333,6 +405,7 @@ async def spawn_container(
         "--tmpfs", "/tmp:rw,size=512m",
         "--tmpfs", "/var/tmp:rw,size=64m",
         "-v", f"{host_dir}:/workspace:Z",
+        *await _get_shared_skill_mounts(agent_id),
         *_claude_auth_args(),
         "-e", f"OLLAMA_ENABLED={ollama_enabled}",
     ]
@@ -411,6 +484,7 @@ async def spawn_scheduled_container(
         "--tmpfs", "/tmp:rw,size=512m",
         "--tmpfs", "/var/tmp:rw,size=64m",
         "-v", f"{host_dir}:/workspace:Z",
+        *await _get_shared_skill_mounts(agent_id),
         *_claude_auth_args(),
         "-e", "OLLAMA_ENABLED=false",
     ]

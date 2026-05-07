@@ -218,11 +218,15 @@ async def create_agent(req: CreateAgentRequest) -> AgentResponse:
 
     container_memory = await get_setting("default_container_memory", "2g")
     container_cpus = await get_setting("default_container_cpus", "2")
+    idle_timeout = int(await get_setting("idle_timeout_seconds", "300"))
+    hard_timeout = int(await get_setting("inflight_hard_timeout", "600"))
 
     await db.execute(
-        "INSERT INTO agents (id, name, icon, host_dir, container_memory, container_cpus) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (agent_id, req.name, icon, str(host_dir), container_memory, container_cpus),
+        "INSERT INTO agents (id, name, icon, host_dir, container_memory, container_cpus, "
+        "idle_timeout_seconds, inflight_hard_timeout) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (agent_id, req.name, icon, str(host_dir), container_memory, container_cpus,
+         idle_timeout, hard_timeout),
     )
     await db.commit()
 
@@ -239,7 +243,8 @@ async def create_agent(req: CreateAgentRequest) -> AgentResponse:
         )
 
     async with db.execute(
-        "SELECT id, name, icon, status, created_at, container_memory, container_cpus "
+        "SELECT id, name, icon, status, created_at, container_memory, container_cpus, "
+        "idle_timeout_seconds, inflight_hard_timeout "
         "FROM agents WHERE id = ?",
         (agent_id,),
     ) as cur:
@@ -248,6 +253,7 @@ async def create_agent(req: CreateAgentRequest) -> AgentResponse:
     return AgentResponse(
         id=row[0], name=row[1], icon=row[2], status=row[3],
         created_at=row[4], container_memory=row[5], container_cpus=row[6],
+        idle_timeout_seconds=row[7], inflight_hard_timeout=row[8],
     )
 
 
@@ -265,7 +271,9 @@ async def list_agents() -> list[AgentResponse]:
         "  (SELECT c.status FROM agent_containers c "
         "   WHERE c.agent_id = a.id ORDER BY c.started_at DESC LIMIT 1) AS container_status, "
         "  a.container_memory, "
-        "  a.container_cpus "
+        "  a.container_cpus, "
+        "  a.idle_timeout_seconds, "
+        "  a.inflight_hard_timeout "
         "FROM agents a WHERE a.status = 'active' ORDER BY a.created_at"
     ) as cur:
         rows = await cur.fetchall()
@@ -274,6 +282,7 @@ async def list_agents() -> list[AgentResponse]:
             id=r[0], name=r[1], icon=r[2] or "", status=r[3],
             created_at=r[4], container_status=r[5],
             container_memory=r[6], container_cpus=r[7],
+            idle_timeout_seconds=r[8], inflight_hard_timeout=r[9],
         )
         for r in rows
     ]
@@ -284,7 +293,7 @@ async def get_agent(agent_id: str) -> AgentDetailResponse:
     db = await get_db()
     async with db.execute(
         "SELECT id, name, icon, status, created_at, host_dir, "
-        "container_memory, container_cpus "
+        "container_memory, container_cpus, idle_timeout_seconds, inflight_hard_timeout "
         "FROM agents WHERE id = ?",
         (agent_id,),
     ) as cur:
@@ -295,6 +304,7 @@ async def get_agent(agent_id: str) -> AgentDetailResponse:
     return AgentDetailResponse(
         id=row[0], name=row[1], icon=row[2] or "", status=row[3],
         created_at=row[4], container_memory=row[6], container_cpus=row[7],
+        idle_timeout_seconds=row[8], inflight_hard_timeout=row[9],
     )
 
 
@@ -2096,6 +2106,17 @@ async def update_setting(key: str, request: Request):
                 detail="session_history_window_size must be an integer between 1 and 100",
             )
 
+    if key in ("idle_timeout_seconds", "inflight_hard_timeout"):
+        try:
+            n = int(value)
+            if n < 60:
+                raise ValueError
+        except (ValueError, TypeError):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{key} must be an integer >= 60",
+            )
+
     await set_setting(key, str(value))
 
     if key == "session_history_window_size":
@@ -2409,12 +2430,19 @@ async def _cleanup_agent(agent_id: str) -> None:
     _gh_approval_manager.cancel_all_for_agent(agent_id)
 
     if container_record_id:
-        # Mark container as idle — reaper will kill after timeout
         db = await get_db()
-        await db.execute(
-            "UPDATE agent_containers SET status = 'idle' WHERE id = ?",
-            (container_record_id,),
-        )
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_queue "
+            "WHERE agent_id = ? AND status IN ('QUEUED', 'IN-FLIGHT')",
+            (agent_id,),
+        ) as cur:
+            pending_count = (await cur.fetchone())[0]
+
+        if pending_count == 0:
+            await db.execute(
+                "UPDATE agent_containers SET status = 'idle' WHERE id = ?",
+                (container_record_id,),
+            )
         await db.commit()
 
     _rate_limits.pop(agent_id, None)

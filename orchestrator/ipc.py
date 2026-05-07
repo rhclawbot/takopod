@@ -99,6 +99,34 @@ async def store_scheduled_message(
     )
 
 
+async def store_script_message(
+    agent_id: str,
+    message_id: str,
+    script_path: str,
+    agentic_task_id: str,
+    timeout: int = 60,
+) -> None:
+    """Queue a run_script message for a periodic script task.
+
+    Unlike store_scheduled_message, this does NOT insert into the messages
+    table — script executions don't need conversation history.
+    """
+    db = await get_db()
+    payload = json.dumps({
+        "type": "run_script",
+        "message_id": message_id,
+        "script": script_path,
+        "timeout": timeout,
+        "agentic_task_id": agentic_task_id,
+    })
+    await db.execute(
+        "INSERT INTO message_queue (id, agent_id, payload, agentic_task_id) "
+        "VALUES (?, ?, ?, ?)",
+        (message_id, agent_id, payload, agentic_task_id),
+    )
+    await db.commit()
+
+
 async def store_bootstrap_message(
     agent_id: str,
     message_id: str,
@@ -161,17 +189,38 @@ async def queue_system_command(agent_id: str, command: str) -> None:
     logger.info("Queued system command '%s' for agent %s", command, agent_id[:8])
 
 
-async def get_queue_counts(agent_id: str) -> dict[str, int]:
+async def get_queue_counts(agent_id: str) -> dict:
     db = await get_db()
-    counts = {"queued": 0, "in_flight": 0}
+    counts: dict = {"queued": 0, "in_flight": 0, "items": []}
     async with db.execute(
         "SELECT status, COUNT(*) FROM message_queue WHERE agent_id = ? GROUP BY status",
         (agent_id,),
     ) as cur:
         async for row in cur:
             key = row[0].lower().replace("-", "_")
-            if key in counts:
+            if key in ("queued", "in_flight"):
                 counts[key] = row[1]
+
+    if counts["queued"] > 0 or counts["in_flight"] > 0:
+        async with db.execute(
+            "SELECT id, payload, status, created_at FROM message_queue "
+            "WHERE agent_id = ? AND status IN ('QUEUED', 'IN-FLIGHT') "
+            "ORDER BY created_at",
+            (agent_id,),
+        ) as cur:
+            async for row in cur:
+                try:
+                    payload = json.loads(row[1])
+                except (json.JSONDecodeError, TypeError):
+                    payload = {}
+                counts["items"].append({
+                    "message_id": row[0],
+                    "payload_type": payload.get("type", "user_message"),
+                    "status": row[2],
+                    "script": payload.get("script"),
+                    "created_at": row[3],
+                })
+
     return counts
 
 
@@ -344,6 +393,26 @@ async def _process_event(
         date = event.get("date")
         if date:
             await _schedule_compaction_task(agent_id, date)
+        return None
+
+    if event_type == "script_result":
+        source = source_metadata or {}
+        task_id = source.get("agentic_task_id")
+        if task_id:
+            exit_code = event.get("exit_code", -1)
+            stderr = event.get("stderr", "")
+            result_str = f"exit_code={exit_code}"
+            if stderr:
+                result_str += f", stderr={stderr[:500]}"
+            try:
+                db = await get_db()
+                await db.execute(
+                    "UPDATE agentic_tasks SET last_result = ? WHERE id = ?",
+                    (result_str, task_id),
+                )
+                await db.commit()
+            except SqliteError:
+                logger.exception("Failed to update script result for task %s", task_id)
         return None
 
     message_id = event.get("message_id", "")
@@ -1108,7 +1177,7 @@ async def _process_output(
             )
             if row_id:
                 notified.add(row_id)
-            if event.get("type") in ("complete", "system_error") and msg_id:
+            if event.get("type") in ("complete", "system_error", "script_result") and msg_id:
                 _inflight_source.pop(msg_id, None)
                 finished_ids.add(msg_id)
         except Exception:
