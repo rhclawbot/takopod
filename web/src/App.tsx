@@ -86,7 +86,7 @@ export function App() {
 
   const { orderedAgents, reorder } = useAgentOrder(agents)
 
-  const { messages, queueStatus, error, systemError, connected, sessionEnded, sendMessage, sendSystemCommand, sendApprovalResponse, stopQuery, reconnect, hasOlderMessages, loadingOlder, loadOlderMessages, deleteMessage } =
+  const { messages, queueStatus, error, systemError, connected, sessionEnded, sendMessage, sendSystemCommand, sendApprovalResponse, stopQuery, reconnect, hasOlderMessages, loadingOlder, loadOlderMessages, deleteMessage, deleteQueueItem } =
     useWebSocket(selectedAgentId)
 
   const fetchAgents = useCallback(async () => {
@@ -284,7 +284,7 @@ export function App() {
                     <ChatMessageList messages={messages} hasOlderMessages={hasOlderMessages} loadingOlder={loadingOlder} onLoadOlder={loadOlderMessages} onApprovalRespond={sendApprovalResponse} onDeleteMessage={deleteMessage} />
                     {(queueStatus.queued > 0 || queueStatus.in_flight > 0) &&
                       !messages.some((m) => m.status === "streaming") && (
-                        <QueueActivityBar status={queueStatus} />
+                        <QueueActivityBar status={queueStatus} onDeleteItem={deleteQueueItem} />
                       )}
                     <ErrorNotification error={error} />
                     <SystemErrorNotification error={systemError} />

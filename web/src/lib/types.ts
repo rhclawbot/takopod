@@ -11,6 +11,8 @@ export interface QueueItem {
   payload_type: string
   status: string
   script?: string | null
+  command?: string | null
+  preview?: string | null
   created_at: string
 }
 

@@ -2265,6 +2265,25 @@ async def delete_agent_message(agent_id: str, message_id: str):
     return {"status": "ok"}
 
 
+@router.delete("/agents/{agent_id}/queue/{item_id}")
+async def delete_queue_item(agent_id: str, item_id: str):
+    """Delete a queued item from the message queue. Only QUEUED items can be deleted."""
+    db = await get_db()
+    cursor = await db.execute(
+        "DELETE FROM message_queue WHERE id = ? AND agent_id = ? AND status = 'QUEUED'",
+        (item_id, agent_id),
+    )
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Queued item not found")
+    await db.execute(
+        "DELETE FROM messages WHERE id = ? AND agent_id = ?",
+        (item_id, agent_id),
+    )
+    await db.commit()
+    counts = await get_queue_counts(agent_id)
+    return QueueStatusFrame(**counts)
+
+
 # --- WebSocket ---
 
 

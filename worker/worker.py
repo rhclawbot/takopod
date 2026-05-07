@@ -258,6 +258,7 @@ async def process_message(msg: dict[str, Any], conn) -> None:
 
     if msg_type == "system_command":
         command = msg.get("command")
+        message_id = msg.get("message_id", "")
         if command == "clear_context":
             # Summarize the current session before clearing
             try:
@@ -274,7 +275,8 @@ async def process_message(msg: dict[str, Any], conn) -> None:
             _session_transcript = []
             if SESSION_HISTORY_PATH.exists():
                 os.remove(SESSION_HISTORY_PATH)
-            emit({"type": "status", "status": "context_cleared", "message_id": ""})
+            emit({"type": "status", "status": "context_cleared", "message_id": message_id})
+            emit({"type": "complete", "content": "", "message_id": message_id, "usage": {}})
         elif command == "shutdown":
             logger.info("Received shutdown command, summarizing session")
             try:
@@ -287,7 +289,7 @@ async def process_message(msg: dict[str, Any], conn) -> None:
             except Exception as e:
                 logger.error("Session-end summary failed: %s", e)
             _persist_session_history()
-            emit({"type": "status", "status": "done", "message_id": ""})
+            emit({"type": "complete", "content": "", "message_id": message_id, "usage": {}})
             flush_responses()
             sys.exit(0)
         return

@@ -180,6 +180,7 @@ async def queue_system_command(agent_id: str, command: str) -> None:
     payload = json.dumps({
         "type": "system_command",
         "command": command,
+        "message_id": cmd_id,
     })
     await db.execute(
         "INSERT INTO message_queue (id, agent_id, payload) VALUES (?, ?, ?)",
@@ -213,11 +214,15 @@ async def get_queue_counts(agent_id: str) -> dict:
                     payload = json.loads(row[1])
                 except (json.JSONDecodeError, TypeError):
                     payload = {}
+                content = payload.get("content", "")
+                preview = content[:80] if content else None
                 counts["items"].append({
                     "message_id": row[0],
                     "payload_type": payload.get("type", "user_message"),
                     "status": row[2],
                     "script": payload.get("script"),
+                    "command": payload.get("command"),
+                    "preview": preview,
                     "created_at": row[3],
                 })
 

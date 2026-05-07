@@ -37,6 +37,8 @@ class QueueItem(BaseModel):
     payload_type: str
     status: str
     script: str | None = None
+    command: str | None = None
+    preview: str | None = None
     created_at: str
 
 class QueueStatusFrame(BaseModel):

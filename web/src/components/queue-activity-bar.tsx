@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react"
-import { ChevronDown, ChevronRight, FileCode, MessageSquare, Terminal } from "lucide-react"
+import { ChevronDown, ChevronRight, FileCode, MessageSquare, Terminal, X } from "lucide-react"
 import type { QueueStatusFrame } from "@/lib/types"
 
 function formatElapsed(createdAt: string): string {
@@ -49,17 +49,24 @@ function ItemIcon({ type }: { type: string }) {
   return <Terminal className="size-3 text-muted-foreground" />
 }
 
-function itemLabel(item: { payload_type: string; script?: string | null }): string {
+function itemLabel(item: { payload_type: string; script?: string | null; command?: string | null; preview?: string | null }): string {
   if (item.payload_type === "run_script" && item.script) {
     const parts = item.script.split("/")
     return parts[parts.length - 1]
   }
-  if (item.payload_type === "user_message") return "User message"
-  if (item.payload_type === "system_command") return "System command"
+  if (item.payload_type === "user_message") {
+    if (item.preview) return item.preview
+    return "User message"
+  }
+  if (item.payload_type === "system_command") {
+    if (item.command === "shutdown") return "System command: shutdown"
+    if (item.command === "clear_context") return "System command: clear context"
+    return "System command"
+  }
   return item.payload_type
 }
 
-export function QueueActivityBar({ status }: { status: QueueStatusFrame }) {
+export function QueueActivityBar({ status, onDeleteItem }: { status: QueueStatusFrame; onDeleteItem?: (itemId: string) => void }) {
   const [expanded, setExpanded] = useState(false)
   const [, tick] = useState(0)
   const items = status.items ?? []
@@ -99,6 +106,14 @@ export function QueueActivityBar({ status }: { status: QueueStatusFrame }) {
               }`}>
                 {item.status === "IN-FLIGHT" ? "running" : "queued"}
               </span>
+              {item.status === "QUEUED" && onDeleteItem && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onDeleteItem(item.message_id) }}
+                  className="rounded p-0.5 hover:bg-destructive/10 hover:text-destructive"
+                >
+                  <X className="size-3" />
+                </button>
+              )}
             </div>
           ))}
         </div>

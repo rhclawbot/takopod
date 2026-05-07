@@ -311,11 +311,24 @@ export function useWebSocket(agentId: string | null) {
     }
   }, [agentId])
 
+  const deleteQueueItem = useCallback(async (itemId: string) => {
+    if (!agentId) return
+    try {
+      const res = await fetch(`/api/agents/${agentId}/queue/${itemId}`, { method: "DELETE" })
+      if (res.ok) {
+        const counts = await res.json()
+        setQueueStatus(counts)
+      }
+    } catch {
+      // ignore
+    }
+  }, [agentId])
+
   const reconnect = useCallback(() => {
     setSessionEnded(null)
     reconnectAttempt.current = 0
     connect()
   }, [connect])
 
-  return { messages, queueStatus, error, systemError, connected, sessionEnded, sendMessage, sendSystemCommand, sendApprovalResponse, stopQuery, reconnect, hasOlderMessages, loadingOlder, loadOlderMessages, deleteMessage }
+  return { messages, queueStatus, error, systemError, connected, sessionEnded, sendMessage, sendSystemCommand, sendApprovalResponse, stopQuery, reconnect, hasOlderMessages, loadingOlder, loadOlderMessages, deleteMessage, deleteQueueItem }
 }
