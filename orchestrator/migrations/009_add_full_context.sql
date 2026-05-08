@@ -1,0 +1,1 @@
+ALTER TABLE agentic_tasks ADD COLUMN full_context INTEGER NOT NULL DEFAULT 0;

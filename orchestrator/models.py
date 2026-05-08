@@ -267,6 +267,7 @@ class ScheduleResponse(BaseModel):
     status: str
     created_at: str
     model: str | None = None
+    full_context: bool = False
 
 
 CHECKER_TRIGGER_TYPES = {"file_watch", "github_pr", "github_issues", "slack_channel"}
@@ -290,6 +291,7 @@ class ScheduleCreateRequest(BaseModel):
     github_state: Literal["open", "closed", "all"] | None = None
     slack_channel_id: str | None = None
     slack_channel_name: str | None = None
+    full_context: bool = False
 
 
 class SlackConfigRequest(BaseModel):

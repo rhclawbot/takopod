@@ -311,6 +311,22 @@ export function useWebSocket(agentId: string | null) {
     }
   }, [agentId])
 
+  const updateMessageSource = useCallback(async (messageId: string, source: "user" | "scheduled_task") => {
+    if (!agentId) return
+    try {
+      const res = await fetch(`/api/agents/${agentId}/messages/${messageId}/source`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source }),
+      })
+      if (res.ok) {
+        setMessages((prev) => prev.map((m) => m.id === messageId ? { ...m, source } : m))
+      }
+    } catch {
+      // ignore
+    }
+  }, [agentId])
+
   const deleteQueueItem = useCallback(async (itemId: string) => {
     if (!agentId) return
     try {
@@ -330,5 +346,5 @@ export function useWebSocket(agentId: string | null) {
     connect()
   }, [connect])
 
-  return { messages, queueStatus, error, systemError, connected, sessionEnded, sendMessage, sendSystemCommand, sendApprovalResponse, stopQuery, reconnect, hasOlderMessages, loadingOlder, loadOlderMessages, deleteMessage, deleteQueueItem }
+  return { messages, queueStatus, error, systemError, connected, sessionEnded, sendMessage, sendSystemCommand, sendApprovalResponse, stopQuery, reconnect, hasOlderMessages, loadingOlder, loadOlderMessages, deleteMessage, deleteQueueItem, updateMessageSource }
 }

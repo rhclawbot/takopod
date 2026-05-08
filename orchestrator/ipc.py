@@ -39,9 +39,9 @@ async def queue_message(
     allowed_tools: list[str] | None = None,
     attachments: list[str] | None = None,
     model: str | None = None,
-    pipeline_payload: typing.Any | None = None,
     channel_id: str | None = None,
     thread_ts: str | None = None,
+    full_context: bool = False,
 ) -> None:
     db = await get_db()
     payload_dict: dict = {
@@ -59,12 +59,12 @@ async def queue_message(
         payload_dict["attachments"] = attachments
     if model:
         payload_dict["model"] = model
-    if pipeline_payload is not None:
-        payload_dict.update(pipeline_payload.to_message_fields())
     if channel_id:
         payload_dict["channel_id"] = channel_id
     if thread_ts:
         payload_dict["thread_ts"] = thread_ts
+    if full_context:
+        payload_dict["full_context"] = True
 
     payload = json.dumps(payload_dict)
     await db.execute(
@@ -83,6 +83,7 @@ async def store_scheduled_message(
     allowed_tools: list[str] | None = None,
     *,
     model: str | None = None,
+    full_context: bool = False,
 ) -> None:
     """Store a user message from a scheduled task and queue it for processing."""
     db = await get_db()
@@ -102,6 +103,7 @@ async def store_scheduled_message(
         agentic_task_id=agentic_task_id,
         allowed_tools=allowed_tools,
         model=model,
+        full_context=full_context,
     )
 
 
@@ -996,58 +998,6 @@ async def _handle_tool_request(
                     "status": "error",
                     "error": f"MCP tool {server_name}/{tool_name} failed: {e}",
                 }
-
-        elif action == "pipeline_trigger":
-            from orchestrator.pipelines import PipelineLoader, PipelineBuilder
-            from orchestrator.pipelines.loader import PipelineLoadError
-
-            project = params.get("project", "")
-            workflow = params.get("workflow", "")
-            run_id = params.get("run_id", "")
-            if not project or not workflow or not run_id:
-                return {
-                    "request_id": request_id,
-                    "status": "error",
-                    "error": f"Missing required parameter(s): project={project!r}, workflow={workflow!r}, run_id={run_id!r}",
-                }
-
-            async with db.execute(
-                "SELECT host_dir FROM agents WHERE id = ?", (agent_id,),
-            ) as cur:
-                row = await cur.fetchone()
-            if not row:
-                return {
-                    "request_id": request_id,
-                    "status": "error",
-                    "error": f"Agent {agent_id} not found",
-                }
-
-            host_dir = Path(row[0])
-            skill_dir = host_dir / ".claude" / "skills" / project
-
-            try:
-                loader = PipelineLoader(skill_dir)
-                config = loader.load_pipeline(workflow)
-                payload = PipelineBuilder().build(config, {"run_id": run_id})
-
-                await queue_message(
-                    agent_id,
-                    message_id=str(uuid.uuid4()),
-                    content=f"Execute {workflow} pipeline for {run_id}",
-                    source="pipeline",
-                    pipeline_payload=payload,
-                )
-                logger.info(
-                    "Pipeline triggered: project=%s workflow=%s run_id=%s",
-                    project, workflow, run_id,
-                )
-                return {
-                    "request_id": request_id,
-                    "status": "ok",
-                    "data": {"triggered": True, "run_id": run_id},
-                }
-            except PipelineLoadError as e:
-                return {"request_id": request_id, "status": "error", "error": str(e)}
 
         else:
             return {"request_id": request_id, "status": "error", "error": f"Unknown action: {action}"}

@@ -39,6 +39,7 @@ import {
   MoreHorizontal,
   Settings,
 } from "lucide-react"
+import { Switch } from "@/components/ui/switch"
 import { AgentIcon } from "@/components/agent-icon"
 import {
   DropdownMenu,
@@ -65,6 +66,9 @@ export function App() {
   const [newAgentName, setNewAgentName] = useState("")
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([])
   const [selectedModel, setSelectedModel] = useState("")
+  const [showScheduledMessages, setShowScheduledMessages] = useState(() => {
+    return localStorage.getItem("takopod:showScheduled") !== "false"
+  })
   const [rightPanelWidth, setRightPanelWidth] = useState(() => {
     const saved = localStorage.getItem("takopod:rightPanelWidth")
     return saved ? Number(saved) : 208
@@ -86,7 +90,7 @@ export function App() {
 
   const { orderedAgents, reorder } = useAgentOrder(agents)
 
-  const { messages, queueStatus, error, systemError, connected, sessionEnded, sendMessage, sendSystemCommand, sendApprovalResponse, stopQuery, reconnect, hasOlderMessages, loadingOlder, loadOlderMessages, deleteMessage, deleteQueueItem } =
+  const { messages, queueStatus, error, systemError, connected, sessionEnded, sendMessage, sendSystemCommand, sendApprovalResponse, stopQuery, reconnect, hasOlderMessages, loadingOlder, loadOlderMessages, deleteMessage, deleteQueueItem, updateMessageSource } =
     useWebSocket(selectedAgentId)
 
   const fetchAgents = useCallback(async () => {
@@ -268,7 +272,18 @@ export function App() {
                           </DropdownMenuCheckboxItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
-                      <div className="ml-auto">
+                      <div className="ml-auto flex items-center gap-1">
+                        <label className="flex items-center gap-1.5 cursor-pointer px-2">
+                          <Switch
+                            size="sm"
+                            checked={showScheduledMessages}
+                            onCheckedChange={(checked) => {
+                              setShowScheduledMessages(checked)
+                              localStorage.setItem("takopod:showScheduled", String(checked))
+                            }}
+                          />
+                          <span className="text-xs text-muted-foreground select-none">Scheduled</span>
+                        </label>
                         <Button
                           variant="ghost"
                           size="sm"
@@ -281,7 +296,7 @@ export function App() {
                         </Button>
                       </div>
                     </div>
-                    <ChatMessageList messages={messages} hasOlderMessages={hasOlderMessages} loadingOlder={loadingOlder} onLoadOlder={loadOlderMessages} onApprovalRespond={sendApprovalResponse} onDeleteMessage={deleteMessage} />
+                    <ChatMessageList messages={messages} showScheduled={showScheduledMessages} hasOlderMessages={hasOlderMessages} loadingOlder={loadingOlder} onLoadOlder={loadOlderMessages} onApprovalRespond={sendApprovalResponse} onDeleteMessage={deleteMessage} onUpdateMessageSource={updateMessageSource} />
                     {(queueStatus.queued > 0 || queueStatus.in_flight > 0) &&
                       !messages.some((m) => m.status === "streaming") && (
                         <QueueActivityBar status={queueStatus} onDeleteItem={deleteQueueItem} />

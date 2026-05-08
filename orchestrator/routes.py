@@ -1689,7 +1689,7 @@ _SCHEDULE_SELECT = (
     "SELECT t.id, t.agent_id, a.name, t.prompt, "
     "t.interval_seconds, t.last_executed_at, t.last_result, t.status, "
     "t.created_at, t.trigger_type, t.base_interval_seconds, t.max_interval_seconds, "
-    "t.model, t.last_checked_at "
+    "t.model, t.last_checked_at, t.full_context "
     "FROM agentic_tasks t "
     "LEFT JOIN agents a ON a.id = t.agent_id "
 )
@@ -1703,6 +1703,7 @@ def _row_to_schedule(r: tuple) -> ScheduleResponse:
         status=r[7], created_at=r[8], trigger_type=r[9] or "interval",
         base_interval_seconds=r[10], max_interval_seconds=r[11],
         model=r[12], last_checked_at=r[13],
+        full_context=bool(r[14]),
     )
 
 
@@ -1849,12 +1850,12 @@ async def create_schedule(body: ScheduleCreateRequest):
         "(id, agent_id, prompt, interval_seconds, "
         "trigger_type, trigger_config, trigger_secret, "
         "base_interval_seconds, max_interval_seconds, model, "
-        "cursor, last_checked_at, status) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'enabled')",
+        "cursor, last_checked_at, full_context, status) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'enabled')",
         (task_id, body.agent_id, body.prompt,
          interval_seconds, body.trigger_type, json.dumps(trigger_config),
          trigger_secret, base_interval, max_interval, body.model,
-         json.dumps(cursor), last_checked_at),
+         json.dumps(cursor), last_checked_at, int(body.full_context)),
     )
     await db.commit()
 
@@ -1909,9 +1910,12 @@ async def update_schedule(task_id: str, request: Request):
     updates = []
     params = []
     for field in ("prompt", "agent_id", "interval_seconds",
-                   "base_interval_seconds", "max_interval_seconds", "model"):
+                   "base_interval_seconds", "max_interval_seconds", "model",
+                   "full_context"):
         if field in body:
             value = body[field]
+            if field == "full_context":
+                value = int(bool(value))
             updates.append(f"{field} = ?")
             params.append(value)
     if not updates:
@@ -1939,6 +1943,37 @@ async def delete_schedule(task_id: str):
     return {"status": "ok", "task_id": task_id}
 
 
+@router.post("/schedules/{task_id}/run")
+async def run_schedule_now(task_id: str):
+    """Manually trigger a schedule to run immediately."""
+    from orchestrator.scheduler import _running_agentic, execute_agentic_task
+
+    db = await get_db()
+    async with db.execute(
+        "SELECT id, agent_id, prompt, allowed_tools, model, full_context "
+        "FROM agentic_tasks WHERE id = ?",
+        (task_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+
+    if task_id in _running_agentic:
+        raise HTTPException(status_code=409, detail="Task is already running")
+
+    allowed_tools = json.loads(row[3]) if row[3] else []
+    task = asyncio.create_task(
+        execute_agentic_task(
+            task_id, row[1], row[2], allowed_tools,
+            model=row[4], full_context=bool(row[5]),
+        ),
+        name=f"agentic-manual-{task_id[:8]}",
+    )
+    _running_agentic[task_id] = task
+
+    return {"status": "ok", "task_id": task_id, "triggered": True}
+
+
 # --- Webhook Trigger ---
 
 # In-memory webhook rate limiter, keyed by task_id -> deque of timestamps
@@ -1953,7 +1988,7 @@ async def trigger_webhook(agent_id: str, task_id: str, request: Request):
     db = await get_db()
 
     async with db.execute(
-        "SELECT id, agent_id, prompt, allowed_tools, trigger_type, trigger_secret, status, model "
+        "SELECT id, agent_id, prompt, allowed_tools, trigger_type, trigger_secret, status, model, full_context "
         "FROM agentic_tasks WHERE id = ? AND agent_id = ?",
         (task_id, agent_id),
     ) as cur:
@@ -1998,7 +2033,10 @@ async def trigger_webhook(agent_id: str, task_id: str, request: Request):
 
     from orchestrator.scheduler import execute_agentic_task
     asyncio.create_task(
-        execute_agentic_task(task_id, agent_id, enriched_prompt, allowed_tools, model=task_model),
+        execute_agentic_task(
+            task_id, agent_id, enriched_prompt, allowed_tools,
+            model=task_model, full_context=bool(row[8]),
+        ),
         name=f"agentic-webhook-{task_id[:8]}",
     )
 
@@ -2148,7 +2186,7 @@ async def get_agent_messages(agent_id: str, limit: int = 100):
         "SELECT m.id, m.role, m.content, m.created_at, m.metadata, m.status "
         "FROM messages m "
         "WHERE m.agent_id = ? AND m.visibility = 'visible' "
-        "  AND m.source NOT IN ('scheduled_task', 'bootstrap') "
+        "  AND m.source != 'bootstrap' "
         "ORDER BY m.created_at DESC LIMIT ?",
         (agent_id, limit),
     ) as cur:
@@ -2171,7 +2209,7 @@ async def hide_agent_messages(agent_id: str):
     await db.execute(
         "UPDATE messages SET visibility = 'hidden' "
         "WHERE visibility = 'visible' AND agent_id = ? "
-        "  AND source NOT IN ('scheduled_task', 'bootstrap', 'system')",
+        "  AND source NOT IN ('bootstrap', 'system')",
         (agent_id,),
     )
     await db.commit()
@@ -2188,7 +2226,7 @@ async def get_older_messages(agent_id: str, before: str | None = None, limit: in
             "SELECT m.id, m.role, m.content, m.created_at, m.metadata, m.status "
             "FROM messages m "
             "WHERE m.agent_id = ? AND m.visibility = 'hidden' AND m.created_at < ? "
-            "  AND m.source NOT IN ('scheduled_task', 'bootstrap') "
+            "  AND m.source != 'bootstrap' "
             "ORDER BY m.created_at DESC LIMIT ?",
             (agent_id, before, limit),
         ) as cur:
@@ -2198,7 +2236,7 @@ async def get_older_messages(agent_id: str, before: str | None = None, limit: in
             "SELECT m.id, m.role, m.content, m.created_at, m.metadata, m.status "
             "FROM messages m "
             "WHERE m.agent_id = ? AND m.visibility = 'hidden' "
-            "  AND m.source NOT IN ('scheduled_task', 'bootstrap') "
+            "  AND m.source != 'bootstrap' "
             "ORDER BY m.created_at DESC LIMIT ?",
             (agent_id, limit),
         ) as cur:
@@ -2266,6 +2304,23 @@ async def get_agent_message(agent_id: str, message_id: str):
         "id": row[0], "role": row[1], "content": row[2],
         "created_at": row[3], "metadata": row[4], "status": row[5],
     }
+
+
+@router.patch("/agents/{agent_id}/messages/{message_id}/source")
+async def update_message_source(agent_id: str, message_id: str, body: dict):
+    """Toggle message source between 'user' and 'scheduled_task'."""
+    new_source = body.get("source")
+    if new_source not in ("user", "scheduled_task"):
+        raise HTTPException(status_code=400, detail="source must be 'user' or 'scheduled_task'")
+    db = await get_db()
+    cursor = await db.execute(
+        "UPDATE messages SET source = ? WHERE id = ? AND agent_id = ?",
+        (new_source, message_id, agent_id),
+    )
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Message not found")
+    await db.commit()
+    return {"status": "ok", "source": new_source}
 
 
 @router.delete("/agents/{agent_id}/messages/{message_id}")
@@ -2876,7 +2931,7 @@ async def websocket_endpoint(ws: WebSocket):
         "SELECT id, role, content, created_at, metadata, status "
         "FROM messages "
         "WHERE agent_id = ? AND visibility = 'visible' "
-        "  AND source NOT IN ('scheduled_task', 'bootstrap') "
+        "  AND source != 'bootstrap' "
         "ORDER BY created_at DESC LIMIT 100",
         (agent_id,),
     ) as cur:

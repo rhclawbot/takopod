@@ -13,7 +13,7 @@ RUN apt-get update && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install Python Agent SDK
-RUN pip install --no-cache-dir claude-agent-sdk sqlite-vec
+RUN pip install --no-cache-dir claude-agent-sdk sqlite-vec pyyaml
 
 WORKDIR /app
 COPY worker.py agent.py db.py embed.py search.py memory.py context_budget.py model_config.py __init__.py ./worker/

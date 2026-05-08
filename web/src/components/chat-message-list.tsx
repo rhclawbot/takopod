@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { ChatMessage, ContentBlock, ToolCallInfo } from "@/lib/types"
-import { Check, ChevronDown, ChevronRight, Clock, EllipsisVertical, FileIcon, ImageIcon, Shield, Terminal, Trash2, Wrench, X } from "lucide-react"
+import { ArrowRightLeft, Check, ChevronDown, ChevronRight, Clock, EllipsisVertical, FileIcon, ImageIcon, Shield, Terminal, Trash2, Wrench, X } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -243,26 +243,34 @@ function groupBlocks(blocks: ContentBlock[]): GroupedBlock[] {
 
 interface ChatMessageListProps {
   messages: ChatMessage[]
+  showScheduled?: boolean
   hasOlderMessages?: boolean
   loadingOlder?: boolean
   onLoadOlder?: () => void
   onApprovalRespond?: (requestId: string, approved: boolean) => void
   onDeleteMessage?: (messageId: string) => void
+  onUpdateMessageSource?: (messageId: string, source: "user" | "scheduled_task") => void
 }
 
 export function ChatMessageList({
   messages,
+  showScheduled = true,
   hasOlderMessages,
   loadingOlder,
   onLoadOlder,
   onApprovalRespond,
   onDeleteMessage,
+  onUpdateMessageSource,
 }: ChatMessageListProps) {
   const endRef = useRef<HTMLDivElement>(null)
   const prevLastIdRef = useRef<string | null>(null)
 
+  const filtered = showScheduled
+    ? messages
+    : messages.filter((m) => m.source !== "scheduled_task")
+
   useEffect(() => {
-    const lastId = messages.length > 0 ? messages[messages.length - 1].id : null
+    const lastId = filtered.length > 0 ? filtered[filtered.length - 1].id : null
     if (lastId !== prevLastIdRef.current) {
       const isInitialLoad = prevLastIdRef.current === null
       endRef.current?.scrollIntoView({
@@ -270,7 +278,7 @@ export function ChatMessageList({
       })
     }
     prevLastIdRef.current = lastId
-  }, [messages])
+  }, [filtered])
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -287,12 +295,12 @@ export function ChatMessageList({
             </button>
           </div>
         )}
-        {messages.length === 0 && (
+        {filtered.length === 0 && (
           <div className="flex flex-1 items-center justify-center text-muted-foreground py-8">
             <p className="text-sm">Send a message to get started.</p>
           </div>
         )}
-        {messages.map((msg) => (
+        {filtered.map((msg) => (
           <div
             key={msg.id}
             className={`group flex items-start gap-1 ${msg.role === "user" ? "justify-end" : "justify-start"}`}
@@ -308,6 +316,10 @@ export function ChatMessageList({
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
+                  <DropdownMenuItem onClick={() => onUpdateMessageSource?.(msg.id, msg.source === "scheduled_task" ? "user" : "scheduled_task")}>
+                    <ArrowRightLeft className="size-4" />
+                    {msg.source === "scheduled_task" ? "Mark as User Message" : "Mark as Scheduled Task"}
+                  </DropdownMenuItem>
                   <DropdownMenuItem variant="destructive" onClick={() => onDeleteMessage?.(msg.id)}>
                     <Trash2 className="size-4" />
                     Delete

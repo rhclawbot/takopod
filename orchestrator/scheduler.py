@@ -266,7 +266,7 @@ async def _poll_agentic_tasks() -> None:
 
     # --- Interval tasks (existing logic) ---
     async with db.execute(
-        "SELECT id, agent_id, prompt, allowed_tools, interval_seconds, model, script "
+        "SELECT id, agent_id, prompt, allowed_tools, interval_seconds, model, script, full_context "
         "FROM agentic_tasks "
         "WHERE status = 'enabled' AND trigger_type = 'interval' "
         "  AND (last_executed_at IS NULL "
@@ -275,7 +275,7 @@ async def _poll_agentic_tasks() -> None:
     ) as cur:
         interval_rows = await cur.fetchall()
 
-    for task_id, agent_id, prompt, allowed_tools_json, interval_seconds, model, script in interval_rows:
+    for task_id, agent_id, prompt, allowed_tools_json, interval_seconds, model, script, fc in interval_rows:
         if task_id in _running_agentic:
             continue
         if script:
@@ -286,7 +286,10 @@ async def _poll_agentic_tasks() -> None:
         else:
             allowed_tools = json.loads(allowed_tools_json) if allowed_tools_json else []
             task = asyncio.create_task(
-                execute_agentic_task(task_id, agent_id, prompt, allowed_tools, model=model),
+                execute_agentic_task(
+                    task_id, agent_id, prompt, allowed_tools,
+                    model=model, full_context=bool(fc),
+                ),
                 name=f"agentic-{task_id[:8]}",
             )
         _running_agentic[task_id] = task
@@ -299,7 +302,7 @@ async def _poll_agentic_tasks() -> None:
         placeholders = ",".join("?" for _ in checker_types)
         async with db.execute(
             "SELECT id, agent_id, prompt, allowed_tools, trigger_type, "
-            "trigger_config, cursor, model "
+            "trigger_config, cursor, model, full_context "
             "FROM agentic_tasks "
             "WHERE status = 'enabled' "
             f"  AND trigger_type IN ({placeholders}) "
@@ -313,7 +316,7 @@ async def _poll_agentic_tasks() -> None:
 
         for row in checker_rows:
             (task_id, agent_id, prompt, allowed_tools_json,
-             trigger_type, trigger_config_json, cursor_json, model) = row
+             trigger_type, trigger_config_json, cursor_json, model, fc) = row
             if task_id in _running_agentic:
                 continue
             trigger_config = json.loads(trigger_config_json) if trigger_config_json else {}
@@ -329,6 +332,7 @@ async def _poll_agentic_tasks() -> None:
                 _run_checker_task(
                     task_id, agent_id, prompt, allowed_tools,
                     trigger_type, trigger_config, cursor, model,
+                    full_context=bool(fc),
                 ),
                 name=f"agentic-check-{task_id[:8]}",
             )
@@ -344,6 +348,8 @@ async def _run_checker_task(
     trigger_config: dict,
     cursor: dict,
     model: str | None,
+    *,
+    full_context: bool = False,
 ) -> None:
     """Run checker, invoke agent only if changes detected, update cursor."""
     from orchestrator.checkers import run_checker
@@ -369,7 +375,7 @@ async def _run_checker_task(
             enriched_prompt = f"{prompt}\n\n{result.summary}"
             success = await execute_agentic_task(
                 task_id, agent_id, enriched_prompt, allowed_tools,
-                model=model, _caller_managed=True,
+                model=model, full_context=full_context, _caller_managed=True,
             )
             # Cursor advances only after successful agent completion
             if success:
@@ -428,6 +434,7 @@ async def execute_agentic_task(
     allowed_tools: list[str],
     *,
     model: str | None = None,
+    full_context: bool = False,
     _caller_managed: bool = False,
 ) -> bool:
     """Queue a scheduled task prompt through the normal message path.
@@ -447,7 +454,7 @@ async def execute_agentic_task(
         await ensure_worker_headless(agent_id)
         await store_scheduled_message(
             agent_id, message_id, prompt, task_id, allowed_tools,
-            model=model,
+            model=model, full_context=full_context,
         )
 
         last_result = await _wait_for_completion(message_id, timeout_seconds=300)

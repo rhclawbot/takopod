@@ -24,10 +24,12 @@ import {
   ChevronRight,
   Copy,
   Info,
+  Loader2,
   Pause,
   Pencil,
   Play,
   Plus,
+  ToggleRight,
   Trash2,
   X,
 } from "lucide-react"
@@ -47,6 +49,7 @@ interface Schedule {
   status: string
   created_at: string
   model: string | null
+  full_context: boolean
 }
 
 interface TriggerTypeOption {
@@ -117,6 +120,7 @@ export function SchedulesView() {
   const [editBaseInterval, setEditBaseInterval] = useState("")
   const [editMaxInterval, setEditMaxInterval] = useState("")
   const [editModel, setEditModel] = useState("")
+  const [editFullContext, setEditFullContext] = useState(false)
 
   const [showCreate, setShowCreate] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -135,11 +139,13 @@ export function SchedulesView() {
   const [newGithubState, setNewGithubState] = useState("open")
   const [newSlackChannelId, setNewSlackChannelId] = useState("")
   const [newSlackChannelName, setNewSlackChannelName] = useState("")
+  const [newFullContext, setNewFullContext] = useState(false)
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([])
   const [triggerTypes, setTriggerTypes] = useState<TriggerTypeOption[]>([])
   const [webhookInfo, setWebhookInfo] = useState<WebhookInfo | null>(null)
   const [showTriggerInfo, setShowTriggerInfo] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [triggeringId, setTriggeringId] = useState<string | null>(null)
 
   const fetchSchedules = useCallback(async () => {
     setLoading(true)
@@ -183,6 +189,18 @@ export function SchedulesView() {
     if (res.ok) fetchSchedules()
   }
 
+  const handleRunNow = async (id: string) => {
+    setTriggeringId(id)
+    try {
+      const res = await fetch(`/api/schedules/${id}/run`, { method: "POST" })
+      if (res.ok) {
+        setTimeout(fetchSchedules, 2000)
+      }
+    } finally {
+      setTriggeringId(null)
+    }
+  }
+
   const startEditing = (s: Schedule) => {
     setEditingId(s.id)
     setEditTriggerType(s.trigger_type)
@@ -192,6 +210,7 @@ export function SchedulesView() {
     setEditBaseInterval(s.base_interval_seconds ? String(Math.floor(s.base_interval_seconds / 60)) : "")
     setEditMaxInterval(s.max_interval_seconds ? String(Math.floor(s.max_interval_seconds / 60)) : "")
     setEditModel(s.model || "")
+    setEditFullContext(s.full_context)
   }
 
   const cancelEditing = () => {
@@ -203,6 +222,7 @@ export function SchedulesView() {
       prompt: editPrompt,
       agent_id: editAgentId,
       model: editModel || null,
+      full_context: editFullContext,
     }
 
     body.interval_seconds = (parseInt(editInterval) || 1) * 60
@@ -240,6 +260,7 @@ export function SchedulesView() {
     setNewGithubState("open")
     setNewSlackChannelId("")
     setNewSlackChannelName("")
+    setNewFullContext(false)
     setWebhookInfo(null)
     setCreateError("")
     setShowTriggerInfo(false)
@@ -261,6 +282,7 @@ export function SchedulesView() {
         prompt: newPrompt.trim(),
         trigger_type: newTriggerType,
         model: newModel || null,
+        full_context: newFullContext,
       }
 
       const isChecker = ["file_watch", "github_pr", "github_issues", "slack_channel"].includes(newTriggerType)
@@ -396,6 +418,11 @@ export function SchedulesView() {
                         {s.model}
                       </span>
                     )}
+                    {s.full_context && (
+                      <Badge variant="outline" className="text-[10px]">
+                        full context
+                      </Badge>
+                    )}
                   </div>
                   <p className="text-sm text-muted-foreground line-clamp-2">{s.prompt}</p>
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -416,17 +443,12 @@ export function SchedulesView() {
                   <Button
                     variant="ghost"
                     size="icon-sm"
-                    onClick={() => startEditing(s)}
+                    title="Run now"
+                    disabled={triggeringId === s.id}
+                    onClick={() => handleRunNow(s.id)}
                   >
-                    <Pencil className="size-3.5" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    onClick={() => handleToggle(s.id, s.status)}
-                  >
-                    {s.status === "enabled" ? (
-                      <Pause className="size-3.5" />
+                    {triggeringId === s.id ? (
+                      <Loader2 className="size-3.5 animate-spin" />
                     ) : (
                       <Play className="size-3.5" />
                     )}
@@ -434,6 +456,27 @@ export function SchedulesView() {
                   <Button
                     variant="ghost"
                     size="icon-sm"
+                    title="Edit"
+                    onClick={() => startEditing(s)}
+                  >
+                    <Pencil className="size-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    title={s.status === "enabled" ? "Pause" : "Resume"}
+                    onClick={() => handleToggle(s.id, s.status)}
+                  >
+                    {s.status === "enabled" ? (
+                      <Pause className="size-3.5" />
+                    ) : (
+                      <ToggleRight className="size-3.5" />
+                    )}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    title="Delete"
                     onClick={() => setConfirmDeleteId(s.id)}
                   >
                     <Trash2 className="size-3.5 text-destructive" />
@@ -606,6 +649,19 @@ export function SchedulesView() {
                       ))}
                     </SelectContent>
                   </Select>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    id="new-full-context"
+                    checked={newFullContext}
+                    onChange={(e) => setNewFullContext(e.target.checked)}
+                    className="size-3.5 rounded border-input accent-primary"
+                  />
+                  <Label htmlFor="new-full-context" className="text-xs cursor-pointer">
+                    Full context (include memory, personality, and search results)
+                  </Label>
                 </div>
 
                 {newTriggerType !== "webhook" && (
@@ -841,6 +897,18 @@ export function SchedulesView() {
                     ))}
                   </SelectContent>
                 </Select>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="edit-full-context"
+                  checked={editFullContext}
+                  onChange={(e) => setEditFullContext(e.target.checked)}
+                  className="size-3.5 rounded border-input accent-primary"
+                />
+                <Label htmlFor="edit-full-context" className="text-xs cursor-pointer">
+                  Full context (include memory, personality, and search results)
+                </Label>
               </div>
               {editTriggerType !== "webhook" && (
                 <div className="flex flex-col gap-1.5">

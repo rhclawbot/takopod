@@ -33,16 +33,21 @@ from claude_agent_sdk import (
     query,
 )
 
+import re
+
+try:
+    import yaml
+except ImportError:
+    yaml = None  # type: ignore[assignment]
+
 from worker.tools import (
     TOOL_NAMES as BUILTIN_TOOL_NAMES,
     create_mcp_proxy_servers,
     create_memory_server,
-    create_pipeline_server,
     create_schedule_server,
     create_slack_thread_server,
 )
 from worker.tools.schedule import TOOL_NAMES as SCHEDULE_TOOL_NAMES
-from worker.tools.pipeline import TOOL_NAMES as PIPELINE_TOOL_NAMES
 
 WORKSPACE = Path("/workspace")
 MAX_TURNS = 25
@@ -68,6 +73,85 @@ def _load_tool_config() -> tuple[list[str], str]:
     return list(DEFAULT_BUILTIN_TOOLS), "acceptEdits"
 
 Emit = Callable[[dict[str, Any]], None]
+
+_FRONTMATTER_CLOSE = re.compile(r"\n---\s*\n|\n---\s*$")
+
+
+def _parse_agent_frontmatter(path: Path) -> tuple[dict[str, Any], str]:
+    """Parse a skill agent .md file into (frontmatter_dict, prompt_body)."""
+    if yaml is None:
+        return {}, path.read_text().strip()
+
+    text = path.read_text().strip()
+    if not text.startswith("---"):
+        return {}, text
+
+    rest = text[3:]
+    match = _FRONTMATTER_CLOSE.search(rest)
+    if match is None:
+        return {}, text
+
+    yaml_str = rest[: match.start()].strip()
+    body = rest[match.end() :].strip()
+
+    try:
+        frontmatter = yaml.safe_load(yaml_str) or {}
+    except yaml.YAMLError:
+        logger.warning("Invalid YAML frontmatter in %s", path)
+        return {}, text
+
+    return frontmatter, body
+
+
+_cached_skill_agents: dict[str, Any] | None = None
+
+
+def _discover_skill_agents() -> dict[str, Any]:
+    """Scan skill directories for agents/*.md and build AgentDefinition dicts.
+
+    Results are cached for the lifetime of the worker process since skill
+    files are synced at container start and don't change at runtime.
+    """
+    global _cached_skill_agents
+    if _cached_skill_agents is not None:
+        return _cached_skill_agents
+
+    from claude_agent_sdk import AgentDefinition
+
+    skills_dir = WORKSPACE / ".claude" / "skills"
+    if not skills_dir.is_dir():
+        _cached_skill_agents = {}
+        return _cached_skill_agents
+
+    agents: dict[str, AgentDefinition] = {}
+    for skill_path in skills_dir.iterdir():
+        if not skill_path.is_dir():
+            continue
+        agents_dir = skill_path / "agents"
+        if not agents_dir.is_dir():
+            continue
+        for agent_file in sorted(agents_dir.glob("*.md")):
+            name = agent_file.stem
+            if name in agents:
+                logger.debug("Skipping duplicate agent '%s' from %s", name, skill_path.name)
+                continue
+            frontmatter, prompt = _parse_agent_frontmatter(agent_file)
+            if "description" not in frontmatter:
+                logger.warning("Agent '%s' missing description, skipping", name)
+                continue
+            try:
+                agents[name] = AgentDefinition(
+                    description=frontmatter["description"],
+                    prompt=prompt,
+                    model=frontmatter.get("model"),
+                    tools=frontmatter.get("tools"),
+                )
+                logger.info("Registered sub-agent '%s' from skill %s", name, skill_path.name)
+            except (TypeError, ValueError) as e:
+                logger.error("Invalid agent definition '%s': %s", name, e)
+
+    _cached_skill_agents = agents
+    return _cached_skill_agents
 
 
 def _build_system_prompt(
@@ -275,7 +359,6 @@ def _build_mcp_servers(
     conn: sqlite3.Connection | None = None,
     *,
     include_schedule: bool = True,
-    include_pipeline: bool = True,
 ) -> tuple[dict[str, Any], list[str]]:
     """Build MCP server dict and proxy tool name list."""
     mcp_proxy_servers = create_mcp_proxy_servers()
@@ -284,8 +367,6 @@ def _build_mcp_servers(
     if include_schedule:
         mcp_servers["schedule"] = create_schedule_server()
     mcp_servers["slack_thread"] = create_slack_thread_server()
-    if include_pipeline:
-        mcp_servers["pipeline"] = create_pipeline_server()
     if conn is not None:
         memory_server = create_memory_server(conn)
         if memory_server is not None:
@@ -312,22 +393,15 @@ async def run_query(
     msg_payload: dict[str, Any] | None = None,
     partial_text_ref: list[str] | None = None,
     model_spec: str | None = None,
-    pipeline_agents: dict[str, dict] | None = None,
-    pipeline_system_prompt: str | None = None,
-    pipeline_max_turns: int | None = None,
-    pipeline_effort: str | None = None,
 ) -> tuple[str | None, dict[str, Any], str]:
     """Run a query through the Claude Agent SDK.
 
     Returns (captured_session_id, usage_dict, full_response_text).
     """
-    if pipeline_system_prompt:
-        system_prompt = pipeline_system_prompt
-    else:
-        system_prompt = _build_system_prompt(
-            retrieved_context, memory_context, continuation_summary,
-            facts_context=facts_context,
-        )
+    system_prompt = _build_system_prompt(
+        retrieved_context, memory_context, continuation_summary,
+        facts_context=facts_context,
+    )
     logger.debug("system_prompt (%d chars):\n%s", len(system_prompt), system_prompt)
 
     # Emit tool events via hooks so the frontend can display them
@@ -376,18 +450,10 @@ async def run_query(
     if has_skills:
         allowed.append("Skill")
 
-    # Build subagent definitions from pipeline config
-    sdk_agents = None
-    if pipeline_agents:
-        from claude_agent_sdk import AgentDefinition
-        sdk_agents = {}
-        for name, agent_dict in pipeline_agents.items():
-            try:
-                sdk_agents[name] = AgentDefinition(**agent_dict)
-            except (TypeError, ValueError) as e:
-                logger.error("Invalid agent definition '%s': %s", name, e)
-        if sdk_agents and "Agent" not in allowed:
-            allowed.append("Agent")
+    # Discover sub-agents from skill directories
+    sdk_agents = _discover_skill_agents()
+    if sdk_agents:
+        allowed.append("Agent")
 
     def _on_cli_stderr(line: str) -> None:
         logger.warning("CLI stderr: %s", line.rstrip())
@@ -398,7 +464,7 @@ async def run_query(
         "setting_sources": ["project"],
         "permission_mode": permission_mode,
         "system_prompt": system_prompt,
-        "max_turns": pipeline_max_turns or MAX_TURNS,
+        "max_turns": MAX_TURNS,
         "mcp_servers": mcp_servers,
         "stderr": _on_cli_stderr,
         "hooks": {
@@ -408,8 +474,6 @@ async def run_query(
     }
     if sdk_agents:
         opts_kwargs["agents"] = sdk_agents
-    if pipeline_effort and "effort" not in opts_kwargs:
-        opts_kwargs["effort"] = pipeline_effort
     if model_spec:
         model_id, effort = parse_model_spec(model_spec)
         if model_id:
@@ -558,33 +622,41 @@ async def run_scheduled_query(
         })
         return {}
 
-    # Exclude schedule and pipeline servers to prevent side effects
+    # Exclude schedule servers to prevent side effects
     mcp_servers, mcp_proxy_tool_names = _build_mcp_servers(
-        conn, include_schedule=False, include_pipeline=False,
+        conn, include_schedule=False,
     )
     builtin_tools, permission_mode = _load_tool_config()
 
-    excluded_tools = set(SCHEDULE_TOOL_NAMES + PIPELINE_TOOL_NAMES)
+    excluded_tools = set(SCHEDULE_TOOL_NAMES)
     filtered_builtins = [t for t in BUILTIN_TOOL_NAMES if t not in excluded_tools]
     allowed = [*builtin_tools, *filtered_builtins, *mcp_proxy_tool_names]
+
+    sdk_agents = _discover_skill_agents()
+    if sdk_agents:
+        allowed.append("Agent")
 
     def _on_cli_stderr(line: str) -> None:
         logger.warning("CLI stderr: %s", line.rstrip())
 
-    options = ClaudeAgentOptions(
-        cwd=str(WORKSPACE),
-        allowed_tools=allowed,
-        setting_sources=["project"],
-        permission_mode=permission_mode,
-        system_prompt=system_prompt,
-        max_turns=MAX_TURNS,
-        mcp_servers=mcp_servers,
-        stderr=_on_cli_stderr,
-        hooks={
+    opts_kwargs: dict[str, Any] = {
+        "cwd": str(WORKSPACE),
+        "allowed_tools": allowed,
+        "setting_sources": ["project"],
+        "permission_mode": permission_mode,
+        "system_prompt": system_prompt,
+        "max_turns": MAX_TURNS,
+        "mcp_servers": mcp_servers,
+        "stderr": _on_cli_stderr,
+        "hooks": {
             "PreToolUse": [HookMatcher(matcher=".*", hooks=[on_pre_tool])],
             "PostToolUse": [HookMatcher(matcher=".*", hooks=[on_post_tool])],
         },
-    )
+    }
+    if sdk_agents:
+        opts_kwargs["agents"] = sdk_agents
+
+    options = ClaudeAgentOptions(**opts_kwargs)
 
     total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
     full_text_parts: list[str] = []

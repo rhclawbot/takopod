@@ -410,8 +410,8 @@ async def process_message(msg: dict[str, Any], conn) -> None:
 
     content = msg.get("content", "")
 
-    # --- Scheduled task: lightweight path, no context loading ---
-    if msg.get("source") == "scheduled_task":
+    # --- Scheduled task: lightweight path unless full_context is set ---
+    if msg.get("source") == "scheduled_task" and not msg.get("full_context"):
         saved_agentic_task_id = _current_agentic_task_id
         _current_agentic_task_id = msg.get("agentic_task_id")
 
@@ -501,17 +501,6 @@ async def process_message(msg: dict[str, Any], conn) -> None:
     partial_text_ref = [""]
     model_spec = msg.get("model")
 
-    # Pipeline support: extract agent/prompt overrides from message payload
-    pipeline_agents = msg.get("pipeline_agents")
-    pipeline_system_prompt = msg.get("pipeline_system_prompt")
-    pipeline_max_turns = msg.get("pipeline_max_turns")
-    pipeline_effort = msg.get("pipeline_effort")
-    if pipeline_agents:
-        logger.info(
-            "Pipeline run detected: %d agent(s), max_turns=%s",
-            len(pipeline_agents), pipeline_max_turns,
-        )
-
     query_task = asyncio.create_task(run_query(
         message_id, content, _session_id, emit,
         conn=conn,
@@ -522,10 +511,6 @@ async def process_message(msg: dict[str, Any], conn) -> None:
         msg_payload=msg,
         partial_text_ref=partial_text_ref,
         model_spec=model_spec,
-        pipeline_agents=pipeline_agents,
-        pipeline_system_prompt=pipeline_system_prompt,
-        pipeline_max_turns=pipeline_max_turns,
-        pipeline_effort=pipeline_effort,
     ))
     monitor_task = asyncio.create_task(_cancel_monitor(query_task))
     try:
