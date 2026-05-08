@@ -218,7 +218,7 @@ def get_oauth_provider(
     If valid tokens exist, no browser interaction is needed.
     """
     storage = FileTokenStorage(server_name)
-    return OAuthClientProvider(
+    provider = OAuthClientProvider(
         server_url=server_url,
         client_metadata=OAuthClientMetadata(
             redirect_uris=[REDIRECT_URI],
@@ -227,8 +227,11 @@ def get_oauth_provider(
             response_types=["code"],
         ),
         storage=storage,
-        # No redirect/callback handlers — if tokens are stored and valid,
-        # the provider will use them directly. If they need refresh, the
-        # provider handles that automatically. If no tokens exist at all,
-        # the connection will fail with an error indicating auth is needed.
     )
+    # The SDK doesn't persist token_expiry_time, so a freshly-created
+    # provider considers stored tokens valid even after they expire.
+    # That causes a 401 → full auth code grant → failure (no redirect
+    # handler in headless mode). Setting expiry to 0 forces the SDK to
+    # attempt a token refresh before the first request.
+    provider.context.token_expiry_time = 0
+    return provider
