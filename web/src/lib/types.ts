@@ -96,6 +96,7 @@ export type ContentBlock =
   | { type: "text"; text: string }
   | { type: "tool_call"; tool: ToolCallInfo }
   | { type: "gh_approval"; request_id: string; command: string; status: "pending" | "approved" | "denied"; source?: string }
+  | { type: "image"; path: string; alt?: string }
 
 export interface ChatMessage {
   id: string
@@ -105,7 +106,7 @@ export interface ChatMessage {
   status?: "streaming" | "complete"
   toolCalls?: ToolCallInfo[]
   blocks?: ContentBlock[]
-  source?: "user" | "scheduled_task"
+  source?: "web" | "scheduled_task"
   attachments?: string[]
 }
 

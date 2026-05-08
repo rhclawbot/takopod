@@ -1,5 +1,5 @@
 -- Track where a message originated (user input, scheduled task, etc.)
-ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT 'user';
+ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT 'web';
 CREATE INDEX IF NOT EXISTS idx_messages_agent_source ON messages(agent_id, source, created_at);
 
 -- Retry tracking for agentic tasks

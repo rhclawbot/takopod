@@ -479,12 +479,10 @@ async def list_agent_files(
 
 @router.get("/agents/{agent_id}/files/{file_path:path}")
 async def read_agent_file(agent_id: str, file_path: str):
-    from fastapi.responses import PlainTextResponse
-
     _, resolved = await _resolve_agent_path(agent_id, file_path)
     if not resolved.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-    return PlainTextResponse(resolved.read_text())
+    return FileResponse(resolved)
 
 
 @router.put("/agents/{agent_id}/files/{file_path:path}")
@@ -756,11 +754,17 @@ async def create_skill(agent_id: str, req: CreateSkillRequest) -> SkillDetail:
 @router.put("/agents/{agent_id}/skills/{skill_id}")
 async def update_skill(agent_id: str, skill_id: str, req: UpdateSkillRequest) -> SkillDetail:
     host_dir, _ = await _resolve_agent_path(agent_id)
+    if _is_always_enabled_skill(skill_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Always-enabled skills can only be edited at the system level",
+        )
     skill_dir = _skills_dir(host_dir) / skill_id
     skill_md = skill_dir / "SKILL.md"
     if not skill_md.is_file():
         raise HTTPException(status_code=404, detail="Skill not found")
     skill_md.write_text(req.content)
+    await _detach_registry_skill(agent_id, skill_id, host_dir)
     name, desc, _ = _parse_skill_frontmatter(req.content)
     return SkillDetail(
         id=skill_id,
@@ -886,6 +890,11 @@ async def upload_skill_files(
     agent_id: str, skill_id: str, files: list[UploadFile],
 ):
     host_dir, _ = await _resolve_agent_path(agent_id)
+    if _is_always_enabled_skill(skill_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Always-enabled skills can only be edited at the system level",
+        )
     skill_dir = _skills_dir(host_dir) / skill_id
     if not skill_dir.is_dir():
         raise HTTPException(status_code=404, detail="Skill not found")
@@ -894,7 +903,6 @@ async def upload_skill_files(
     for f in files:
         if not f.filename:
             continue
-        # Prevent path traversal (absolute paths, .., and symlink tricks)
         rel = Path(f.filename)
         if rel.is_absolute() or ".." in rel.parts:
             raise HTTPException(status_code=400, detail=f"Invalid filename: {f.filename}")
@@ -908,6 +916,8 @@ async def upload_skill_files(
             dest.chmod(0o755)
         uploaded.append(str(rel))
 
+    if uploaded:
+        await _detach_registry_skill(agent_id, skill_id, host_dir)
     return {"status": "ok", "uploaded": uploaded}
 
 
@@ -929,6 +939,11 @@ async def get_skill_file(agent_id: str, skill_id: str, file_path: str):
 @router.delete("/agents/{agent_id}/skills/{skill_id}/files/{file_path:path}")
 async def delete_skill_file(agent_id: str, skill_id: str, file_path: str):
     host_dir, _ = await _resolve_agent_path(agent_id)
+    if _is_always_enabled_skill(skill_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Always-enabled skills can only be edited at the system level",
+        )
     skill_dir = _skills_dir(host_dir) / skill_id
     if not skill_dir.is_dir():
         raise HTTPException(status_code=404, detail="Skill not found")
@@ -938,11 +953,11 @@ async def delete_skill_file(agent_id: str, skill_id: str, file_path: str):
     if not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     target.unlink()
-    # Clean up empty parent directories
     parent = target.parent
     while parent != skill_dir and not any(parent.iterdir()):
         parent.rmdir()
         parent = parent.parent
+    await _detach_registry_skill(agent_id, skill_id, host_dir)
     return {"status": "ok", "deleted": file_path}
 
 
@@ -1109,6 +1124,43 @@ def _is_always_enabled_skill(skill_id: str) -> bool:
     _, skill_path, _ = found
     _, _, always_on = _parse_skill_frontmatter(skill_path.read_text())
     return always_on
+
+
+async def _detach_registry_skill(agent_id: str, skill_id: str, host_dir: Path) -> bool:
+    """Convert a registry skill to a custom skill for this agent.
+
+    Removes the skill from agent_skills DB and .registry.json manifest so
+    sync_agent_skills() will no longer overwrite it. No-op if the skill
+    is not a registry skill for this agent. Returns True if detached.
+    """
+    db = await get_db()
+    async with db.execute(
+        "SELECT 1 FROM agent_skills WHERE agent_id = ? AND skill_id = ?",
+        (agent_id, skill_id),
+    ) as cur:
+        if not await cur.fetchone():
+            return False
+
+    await db.execute(
+        "DELETE FROM agent_skills WHERE agent_id = ? AND skill_id = ?",
+        (agent_id, skill_id),
+    )
+    await db.commit()
+
+    manifest_path = _skills_dir(host_dir) / ".registry.json"
+    if manifest_path.is_file():
+        try:
+            manifest = set(json.loads(manifest_path.read_text()))
+            manifest.discard(skill_id)
+            manifest_path.write_text(json.dumps(sorted(manifest)))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    logger.info(
+        "Detached registry skill %s for agent %s → now a custom skill",
+        skill_id, agent_id[:8],
+    )
+    return True
 
 
 def _extract_and_validate_zip(zip_bytes: bytes, target_dir: Path) -> tuple[str, str]:
@@ -2308,10 +2360,10 @@ async def get_agent_message(agent_id: str, message_id: str):
 
 @router.patch("/agents/{agent_id}/messages/{message_id}/source")
 async def update_message_source(agent_id: str, message_id: str, body: dict):
-    """Toggle message source between 'user' and 'scheduled_task'."""
+    """Toggle message source between 'web' and 'scheduled_task'."""
     new_source = body.get("source")
-    if new_source not in ("user", "scheduled_task"):
-        raise HTTPException(status_code=400, detail="source must be 'user' or 'scheduled_task'")
+    if new_source not in ("web", "scheduled_task"):
+        raise HTTPException(status_code=400, detail="source must be 'web' or 'scheduled_task'")
     db = await get_db()
     cursor = await db.execute(
         "UPDATE messages SET source = ? WHERE id = ? AND agent_id = ?",
@@ -2347,10 +2399,11 @@ async def delete_agent_message(agent_id: str, message_id: str):
 
 @router.delete("/agents/{agent_id}/queue/{item_id}")
 async def delete_queue_item(agent_id: str, item_id: str):
-    """Delete a queued item from the message queue. Only QUEUED items can be deleted."""
+    """Delete a queued or stuck in-flight item from the message queue."""
     db = await get_db()
     cursor = await db.execute(
-        "DELETE FROM message_queue WHERE id = ? AND agent_id = ? AND status = 'QUEUED'",
+        "DELETE FROM message_queue WHERE id = ? AND agent_id = ? "
+        "AND status IN ('QUEUED', 'IN-FLIGHT')",
         (item_id, agent_id),
     )
     if cursor.rowcount == 0:

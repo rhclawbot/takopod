@@ -61,24 +61,31 @@ _current_agentic_task_id: str | None = None
 _conn = None
 
 
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"}
+
+
 def _cleanup_attachments(attachments: list[str]) -> None:
-    """Delete uploaded attachment files and their parent upload directory."""
+    """Delete uploaded attachment files and their parent upload directory.
+
+    Image files are preserved for inline display in chat history.
+    """
     dirs_to_remove: set[Path] = set()
     for rel_path in attachments:
         full_path = WORKSPACE / rel_path
+        if full_path.suffix.lower() in _IMAGE_EXTENSIONS:
+            continue
         try:
             full_path.unlink(missing_ok=True)
             dirs_to_remove.add(full_path.parent)
         except OSError:
             pass
-    # Remove empty upload-id directories (e.g. uploads/abc12345/)
     for d in dirs_to_remove:
         try:
             if d.is_dir() and not any(d.iterdir()):
                 d.rmdir()
         except OSError:
             pass
-    logger.info("Cleaned up %d attachment(s)", len(attachments))
+    logger.info("Cleaned up attachment(s), preserved images")
 
 
 def atomic_write(path: Path, data: bytes) -> None:

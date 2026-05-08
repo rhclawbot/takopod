@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { ChatMessage, ContentBlock, ToolCallInfo } from "@/lib/types"
-import { ArrowRightLeft, Check, ChevronDown, ChevronRight, Clock, EllipsisVertical, FileIcon, ImageIcon, Shield, Terminal, Trash2, Wrench, X } from "lucide-react"
+import { ArrowRightLeft, Check, ChevronDown, ChevronRight, Clock, EllipsisVertical, FileIcon, Shield, Terminal, Trash2, Wrench, X } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -190,25 +190,86 @@ function isImageFile(path: string) {
   return /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(path)
 }
 
-function AttachmentChips({ paths }: { paths: string[] }) {
+function InlineImage({
+  path,
+  alt,
+  agentId,
+}: {
+  path: string
+  alt?: string
+  agentId: string
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const src = `/api/agents/${agentId}/files/${path.split("/").map(encodeURIComponent).join("/")}`
+  const filename = path.split("/").pop() ?? path
+
   return (
-    <div className="mt-1.5 flex flex-wrap gap-1">
-      {paths.map((p) => {
-        const name = p.split("/").pop() ?? p
-        return (
-          <span
-            key={p}
-            className="inline-flex items-center gap-1 rounded border bg-primary-foreground/10 px-1.5 py-0.5 text-[11px] text-primary-foreground/80"
-          >
-            {isImageFile(name) ? (
-              <ImageIcon className="size-3" />
-            ) : (
-              <FileIcon className="size-3" />
-            )}
-            <span className="max-w-[100px] truncate">{name}</span>
-          </span>
-        )
-      })}
+    <>
+      <div className="mt-1.5">
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          className="block overflow-hidden rounded border border-border/50 bg-background/50"
+        >
+          <img
+            src={src}
+            alt={alt ?? filename}
+            loading="lazy"
+            className="max-h-64 max-w-full object-contain"
+          />
+        </button>
+        <span className="mt-0.5 block text-[10px] text-muted-foreground">
+          {filename}
+        </span>
+      </div>
+      {expanded && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 cursor-pointer"
+          onClick={() => setExpanded(false)}
+          onKeyDown={(e) => e.key === "Escape" && setExpanded(false)}
+          role="dialog"
+          tabIndex={0}
+        >
+          <img
+            src={src}
+            alt={alt ?? filename}
+            className="max-h-[90vh] max-w-[90vw] object-contain"
+          />
+        </div>
+      )}
+    </>
+  )
+}
+
+function AttachmentChips({ paths, agentId }: { paths: string[]; agentId: string | null }) {
+  const imagePaths = paths.filter(isImageFile)
+  const otherPaths = paths.filter((p) => !isImageFile(p))
+
+  return (
+    <div className="mt-1.5">
+      {agentId && imagePaths.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-1">
+          {imagePaths.map((p) => (
+            <InlineImage key={p} path={p} agentId={agentId} />
+          ))}
+        </div>
+      )}
+      {otherPaths.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {otherPaths.map((p) => {
+            const name = p.split("/").pop() ?? p
+            return (
+              <span
+                key={p}
+                className="inline-flex items-center gap-1 rounded border bg-primary-foreground/10 px-1.5 py-0.5 text-[11px] text-primary-foreground/80"
+              >
+                <FileIcon className="size-3" />
+                <span className="max-w-[100px] truncate">{name}</span>
+              </span>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }
@@ -242,6 +303,7 @@ function groupBlocks(blocks: ContentBlock[]): GroupedBlock[] {
 }
 
 interface ChatMessageListProps {
+  agentId: string | null
   messages: ChatMessage[]
   showScheduled?: boolean
   hasOlderMessages?: boolean
@@ -249,10 +311,11 @@ interface ChatMessageListProps {
   onLoadOlder?: () => void
   onApprovalRespond?: (requestId: string, approved: boolean) => void
   onDeleteMessage?: (messageId: string) => void
-  onUpdateMessageSource?: (messageId: string, source: "user" | "scheduled_task") => void
+  onUpdateMessageSource?: (messageId: string, source: "web" | "scheduled_task") => void
 }
 
 export function ChatMessageList({
+  agentId,
   messages,
   showScheduled = true,
   hasOlderMessages,
@@ -316,10 +379,12 @@ export function ChatMessageList({
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => onUpdateMessageSource?.(msg.id, msg.source === "scheduled_task" ? "user" : "scheduled_task")}>
-                    <ArrowRightLeft className="size-4" />
-                    {msg.source === "scheduled_task" ? "Mark as User Message" : "Mark as Scheduled Task"}
-                  </DropdownMenuItem>
+                  {msg.source === "scheduled_task" && (
+                    <DropdownMenuItem onClick={() => onUpdateMessageSource?.(msg.id, "web")}>
+                      <ArrowRightLeft className="size-4" />
+                      Mark as User Message
+                    </DropdownMenuItem>
+                  )}
                   <DropdownMenuItem variant="destructive" onClick={() => onDeleteMessage?.(msg.id)}>
                     <Trash2 className="size-4" />
                     Delete
@@ -351,6 +416,8 @@ export function ChatMessageList({
                     </div>
                   ) : group.block.type === "gh_approval" ? (
                     <GhApprovalBlock key={group.block.request_id} block={group.block} onRespond={onApprovalRespond} />
+                  ) : group.block.type === "image" && agentId ? (
+                    <InlineImage key={group.index} path={group.block.path} alt={group.block.alt} agentId={agentId} />
                   ) : null,
                 )
               ) : msg.status === "streaming" && !msg.content ? (
@@ -363,7 +430,7 @@ export function ChatMessageList({
                 <span className="whitespace-pre-wrap break-all">{msg.content}</span>
               )}
               {msg.role === "user" && msg.attachments && msg.attachments.length > 0 && (
-                <AttachmentChips paths={msg.attachments} />
+                <AttachmentChips paths={msg.attachments} agentId={agentId} />
               )}
               </div>
             </div>

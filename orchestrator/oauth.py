@@ -10,7 +10,12 @@ from typing import Any
 
 import httpx
 from mcp.client.auth import OAuthClientProvider
-from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
+from mcp.shared.auth import (
+    OAuthClientInformationFull,
+    OAuthClientMetadata,
+    OAuthMetadata,
+    OAuthToken,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +66,20 @@ class FileTokenStorage:
         data = self._read()
         data["client_info"] = json.loads(
             client_info.model_dump_json(exclude_none=True),
+        )
+        self._write(data)
+
+    def get_oauth_metadata(self) -> OAuthMetadata | None:
+        data = self._read()
+        raw = data.get("oauth_metadata")
+        if raw:
+            return OAuthMetadata(**raw)
+        return None
+
+    async def set_oauth_metadata(self, metadata: OAuthMetadata) -> None:
+        data = self._read()
+        data["oauth_metadata"] = json.loads(
+            metadata.model_dump_json(exclude_none=True),
         )
         self._write(data)
 
@@ -151,6 +170,10 @@ class OAuthFlowManager:
                         "OAuth trigger request for '%s' returned %d",
                         server_name, resp.status_code,
                     )
+                    if provider.context.oauth_metadata:
+                        await storage.set_oauth_metadata(
+                            provider.context.oauth_metadata,
+                        )
             except Exception as exc:
                 msg = f"OAuth flow failed for server '{server_name}': {exc}"
                 logger.exception(msg)
@@ -228,10 +251,13 @@ def get_oauth_provider(
         ),
         storage=storage,
     )
-    # The SDK doesn't persist token_expiry_time, so a freshly-created
-    # provider considers stored tokens valid even after they expire.
-    # That causes a 401 → full auth code grant → failure (no redirect
-    # handler in headless mode). Setting expiry to 0 forces the SDK to
-    # attempt a token refresh before the first request.
+    # The SDK doesn't persist token_expiry_time or oauth_metadata, so a
+    # freshly-created provider considers stored tokens valid even after
+    # they expire, and doesn't know the correct token endpoint for
+    # refreshes. Setting expiry to 0 forces a refresh, and restoring
+    # oauth_metadata ensures the refresh hits the right URL.
     provider.context.token_expiry_time = 0
+    oauth_metadata = storage.get_oauth_metadata()
+    if oauth_metadata:
+        provider.context.oauth_metadata = oauth_metadata
     return provider

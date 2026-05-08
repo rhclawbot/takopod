@@ -296,7 +296,7 @@ export function App() {
                         </Button>
                       </div>
                     </div>
-                    <ChatMessageList messages={messages} showScheduled={showScheduledMessages} hasOlderMessages={hasOlderMessages} loadingOlder={loadingOlder} onLoadOlder={loadOlderMessages} onApprovalRespond={sendApprovalResponse} onDeleteMessage={deleteMessage} onUpdateMessageSource={updateMessageSource} />
+                    <ChatMessageList agentId={selectedAgentId} messages={messages} showScheduled={showScheduledMessages} hasOlderMessages={hasOlderMessages} loadingOlder={loadingOlder} onLoadOlder={loadOlderMessages} onApprovalRespond={sendApprovalResponse} onDeleteMessage={deleteMessage} onUpdateMessageSource={updateMessageSource} />
                     {(queueStatus.queued > 0 || queueStatus.in_flight > 0) &&
                       !messages.some((m) => m.status === "streaming") && (
                         <QueueActivityBar status={queueStatus} onDeleteItem={deleteQueueItem} />

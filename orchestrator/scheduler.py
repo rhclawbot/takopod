@@ -798,6 +798,11 @@ async def _check_worker_liveness() -> None:
             "WHERE agent_id = ? AND status = 'streaming'",
             (agent_id,),
         )
+        await db.execute(
+            "DELETE FROM message_queue "
+            "WHERE agent_id = ? AND status = 'IN-FLIGHT'",
+            (agent_id,),
+        )
         await db.commit()
 
 
@@ -929,6 +934,11 @@ async def _reap_idle_workers() -> None:
             "UPDATE agent_containers SET status = 'stopped', stopped_at = ? "
             "WHERE id = ?",
             (now, record_id),
+        )
+        await db.execute(
+            "DELETE FROM message_queue "
+            "WHERE agent_id = ? AND status = 'IN-FLIGHT'",
+            (agent_id,),
         )
         await db.commit()
 

@@ -106,7 +106,7 @@ export function QueueActivityBar({ status, onDeleteItem }: { status: QueueStatus
               }`}>
                 {item.status === "IN-FLIGHT" ? "running" : "queued"}
               </span>
-              {item.status === "QUEUED" && onDeleteItem && (
+              {onDeleteItem && (
                 <button
                   onClick={(e) => { e.stopPropagation(); onDeleteItem(item.message_id) }}
                   className="rounded p-0.5 hover:bg-destructive/10 hover:text-destructive"

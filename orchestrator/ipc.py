@@ -34,7 +34,7 @@ async def queue_message(
     message_id: str,
     content: str,
     *,
-    source: str = "user",
+    source: str = "web",
     agentic_task_id: str | None = None,
     allowed_tools: list[str] | None = None,
     attachments: list[str] | None = None,
@@ -279,10 +279,10 @@ async def _db_ensure_row(
     row_id: str, agent_id: str, extra_metadata: dict | None = None,
 ) -> None:
     meta: dict = {"blocks": []}
-    source = "user"
+    source = "web"
     if extra_metadata:
         meta.update(extra_metadata)
-        source = extra_metadata.get("source", "user")
+        source = extra_metadata.get("source", "web")
     metadata = json.dumps(meta)
     try:
         db = await get_db()
@@ -390,6 +390,33 @@ async def _db_complete(
         logger.exception("Failed to complete message %s", row_id)
 
 
+import re
+
+_IMAGE_RE = re.compile(
+    r"/workspace/([\w/._-]+\.(?:png|jpe?g|gif|webp|svg|bmp))",
+    re.IGNORECASE,
+)
+
+
+async def _extract_image_paths(output: str, agent_id: str) -> list[str]:
+    """Extract workspace-relative image paths from tool output text."""
+    matches = _IMAGE_RE.findall(output)
+    if not matches:
+        return []
+    try:
+        db = await get_db()
+        async with db.execute(
+            "SELECT host_dir FROM agents WHERE id = ?", (agent_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return []
+    except SqliteError:
+        return []
+    host_dir = Path(row[0])
+    return [m for m in matches if (host_dir / m).is_file()]
+
+
 # --- Event processing ---
 
 
@@ -476,6 +503,18 @@ async def _process_event(
         await _db_update_tool_result(
             row_id, event.get("tool_call_id", ""), event.get("output", ""),
         )
+        output = event.get("output", "")
+        if output:
+            for img_path in await _extract_image_paths(output, agent_id):
+                await _db_append_block(row_id, {"type": "image", "path": img_path})
+
+    elif event_type == "image":
+        await _db_ensure_row(row_id, agent_id, source_metadata)
+        await _db_append_block(row_id, {
+            "type": "image",
+            "path": event.get("path", ""),
+            "alt": event.get("alt", ""),
+        })
 
     elif event_type == "complete":
         usage = event.get("usage")
@@ -1267,8 +1306,8 @@ async def _polling_loop(
                 for msg in messages:
                     message_id = msg.get("message_id")
                     if message_id:
-                        source = msg.get("source", "user")
-                        if source != "user":
+                        source = msg.get("source", "web")
+                        if source != "web":
                             entry: dict = {"source": source}
                             if msg.get("agentic_task_id"):
                                 entry["agentic_task_id"] = msg["agentic_task_id"]

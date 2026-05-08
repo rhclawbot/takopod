@@ -311,7 +311,7 @@ export function useWebSocket(agentId: string | null) {
     }
   }, [agentId])
 
-  const updateMessageSource = useCallback(async (messageId: string, source: "user" | "scheduled_task") => {
+  const updateMessageSource = useCallback(async (messageId: string, source: "web" | "scheduled_task") => {
     if (!agentId) return
     try {
       const res = await fetch(`/api/agents/${agentId}/messages/${messageId}/source`, {
